@@ -7,9 +7,9 @@ It keeps the profile metadata in plaintext, keeps the env payload encrypted on d
 ## Commands
 
 ```bash
-runvault encrypt --input .env --output .env.enc
-runvault run --profile profiles/glt.market.local.yaml
-runvault ping --profile profiles/glt.market.local.yaml
+runvault encrypt .env .env.enc
+runvault run profiles/glt.market.local.yaml
+runvault ping profiles/glt.market.local.yaml
 ```
 
 ## Profile format

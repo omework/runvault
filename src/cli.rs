@@ -17,14 +17,11 @@ pub enum Command {
 
 #[derive(Debug, Args)]
 pub struct EncryptArgs {
-    #[arg(long)]
     pub input: PathBuf,
-    #[arg(long)]
     pub output: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
 pub struct ProfileArgs {
-    #[arg(long)]
     pub profile: PathBuf,
 }
