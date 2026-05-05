@@ -8,6 +8,11 @@ It keeps the profile metadata in plaintext, keeps the env payload encrypted on d
 
 ```bash
 runvault encrypt .env .env.enc
+runvault set profiles/glt.market.local.yaml DATABASE_URL --value postgres://...
+runvault set profiles/glt.market.local.yaml GOOGLE_APPLICATION_CREDENTIALS \
+  --from-file ./gcp-service-account.json \
+  --value-path .runvault/gcp-service-account.json
+runvault delete profiles/glt.market.local.yaml GOOGLE_APPLICATION_CREDENTIALS
 runvault run profiles/glt.market.local.yaml
 runvault ping profiles/glt.market.local.yaml
 ```
@@ -31,10 +36,35 @@ pings:
     interval_millis: 500
 ```
 
+## Value modes
+
+`runvault` supports two stored value types inside the encrypted payload:
+
+- plain text values
+- file-backed values
+
+Plain text values are injected directly as environment variables.
+
+File-backed values store the file bytes encrypted in the vault and, at runtime, materialize them to the configured `--value-path` before the target command starts. The environment variable value is that configured file path.
+
+Example:
+
+```bash
+runvault set profiles/glt.market.local.yaml GOOGLE_APPLICATION_CREDENTIALS \
+  --from-file ./gcp-service-account.json \
+  --value-path .runvault/gcp-service-account.json
+```
+
+At runtime, `runvault` will:
+- write the encrypted file content to `<workdir>/.runvault/gcp-service-account.json`
+- set `GOOGLE_APPLICATION_CREDENTIALS=.runvault/gcp-service-account.json`
+- remove the file again after the child process exits
+
 ## Notes
 
 - the profile stays plaintext
 - the env payload is expected to be age passphrase-encrypted
 - plaintext env files are only used as `encrypt` input
-- `runvault` never writes decrypted env content back to disk
+- `runvault` never writes decrypted plain text values back to disk
+- file-backed values are written only for the child runtime, then cleaned up
 - when `clear_env` is true, `runvault` keeps a small default passthrough set like `PATH`, `HOME`, `USER`, `SHELL`, and `TMPDIR`

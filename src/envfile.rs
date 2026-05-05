@@ -31,7 +31,7 @@ pub fn parse_env_bytes(input: &[u8]) -> Result<BTreeMap<String, String>, Error> 
                 line_number
             )));
         }
-        if !is_valid_env_key(key) {
+        if !validate_env_key(key) {
             return Err(Error::EnvParse(format!(
                 "line {} has an invalid key '{}'",
                 line_number, key
@@ -110,7 +110,7 @@ fn parse_single_quoted(raw_value: &str, line_number: usize) -> Result<String, Er
     Ok(raw_value[1..raw_value.len() - 1].to_string())
 }
 
-fn is_valid_env_key(value: &str) -> bool {
+pub fn validate_env_key(value: &str) -> bool {
     let mut chars = value.chars();
     matches!(chars.next(), Some(ch) if ch == '_' || ch.is_ascii_alphabetic())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
@@ -118,7 +118,7 @@ fn is_valid_env_key(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_env_bytes;
+    use super::{parse_env_bytes, validate_env_key};
 
     #[test]
     fn parses_env_lines() {
@@ -137,5 +137,12 @@ mod tests {
         assert_eq!(vars.get("NAME").unwrap(), "hello world");
         assert_eq!(vars.get("SINGLE").unwrap(), "ok");
         assert_eq!(vars.get("RAW").unwrap(), "value");
+    }
+
+    #[test]
+    fn validates_env_keys() {
+        assert!(validate_env_key("API_KEY"));
+        assert!(!validate_env_key("1API_KEY"));
+        assert!(!validate_env_key("API-KEY"));
     }
 }

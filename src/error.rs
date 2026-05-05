@@ -34,10 +34,28 @@ pub enum Error {
     EnvParse(String),
     #[error("profile is invalid: {0}")]
     InvalidProfile(String),
+    #[error("invalid config key '{0}'")]
+    InvalidConfigKey(String),
+    #[error("config key '{0}' does not exist")]
+    MissingConfigKey(String),
+    #[error("vault payload is invalid: {0}")]
+    VaultFormat(String),
+    #[error("failed to serialize vault payload: {0}")]
+    VaultSerialize(String),
+    #[error("failed to decode stored file payload for key '{key}': {source}")]
+    FileContentDecode {
+        key: String,
+        #[source]
+        source: base64::DecodeError,
+    },
+    #[error("file-backed values require --value-path")]
+    MissingValuePath,
     #[error("http ping failed: {0}")]
     HttpPing(String),
     #[error("command exited before health checks passed")]
     ChildExitedEarly,
+    #[error("runtime file path already exists: {0}")]
+    RuntimeFilePathExists(PathBuf),
     #[error("command failed with status {0}")]
     CommandFailed(String),
 }
