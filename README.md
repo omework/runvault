@@ -17,6 +17,7 @@ The default folder model is:
 ## Commands
 
 ```bash
+runvault create-profile deployments/ovh/services
 runvault encrypt .env
 runvault set deployments/ovh/services DATABASE_URL --value postgres://...
 runvault import deployments/ovh/services .env.example --prefix PROD_
@@ -36,6 +37,12 @@ runvault run deployments/ovh/services
 runvault ping deployments/ovh/services
 ```
 
+`create-profile` bootstraps the profile folder by creating:
+
+- `runvault.yaml`
+
+It does not create `env.sec`; that file is created lazily by the first `set` or `import`.
+
 ## Profile format
 
 ```yaml
@@ -54,6 +61,31 @@ pings:
 ```
 
 If `env_file` is omitted, it defaults to `env.sec` next to `runvault.yaml`.
+
+## Creating a profile folder
+
+Bootstrap a new profile folder with:
+
+```bash
+runvault create-profile deployments/ovh/services
+```
+
+You can override the generated profile name and encrypted env filename:
+
+```bash
+runvault create-profile deployments/ovh/services \
+  --name ovh-services \
+  --env-file env.sec
+```
+
+The generated `runvault.yaml` uses a safe placeholder command:
+
+```yaml
+run:
+  cmd: ["echo", "configure run.cmd in runvault.yaml"]
+```
+
+Edit that before you rely on `runvault run`.
 
 If a command input path is a directory, `runvault` resolves:
 

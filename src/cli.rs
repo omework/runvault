@@ -10,6 +10,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    CreateProfile(CreateProfileArgs),
     Encrypt(EncryptArgs),
     Set(SetArgs),
     Import(ImportArgs),
@@ -17,6 +18,15 @@ pub enum Command {
     Reveal(RevealArgs),
     Run(ProfileArgs),
     Ping(ProfileArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CreateProfileArgs {
+    pub profile: PathBuf,
+    #[arg(long)]
+    pub name: Option<String>,
+    #[arg(long = "env-file", default_value = "env.sec")]
+    pub env_file: PathBuf,
 }
 
 #[derive(Debug, Args)]

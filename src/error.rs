@@ -14,6 +14,8 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+    #[error("refusing to overwrite existing path {0}")]
+    AlreadyExists(PathBuf),
     #[error("failed to parse profile {path}: {source}")]
     ProfileParse {
         path: PathBuf,

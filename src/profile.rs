@@ -37,6 +37,12 @@ pub struct PingTarget {
     pub interval_millis: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateProfileOptions {
+    pub name: Option<String>,
+    pub env_file: PathBuf,
+}
+
 fn default_clear_env() -> bool {
     true
 }
@@ -115,9 +121,77 @@ pub fn resolve_profile_path(input: &Path) -> PathBuf {
     }
 }
 
+pub fn create_profile(path: &Path, options: &CreateProfileOptions) -> Result<PathBuf, Error> {
+    let profile_dir = if path.extension().is_some_and(|value| value == "yaml") {
+        path.parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf()
+    } else {
+        path.to_path_buf()
+    };
+
+    std::fs::create_dir_all(&profile_dir).map_err(|source| Error::WriteFile {
+        path: profile_dir.clone(),
+        source,
+    })?;
+
+    let profile_path = profile_dir.join(DEFAULT_PROFILE_FILE);
+    if profile_path.exists() {
+        return Err(Error::AlreadyExists(profile_path));
+    }
+
+    let name = options
+        .name
+        .clone()
+        .unwrap_or_else(|| infer_profile_name(&profile_dir));
+    if name.trim().is_empty() {
+        return Err(Error::InvalidProfile(
+            "profile name must not be empty".to_string(),
+        ));
+    }
+
+    let env_file = if options.env_file.as_os_str().is_empty() {
+        PathBuf::from(DEFAULT_ENV_FILE)
+    } else {
+        options.env_file.clone()
+    };
+
+    let yaml = format!(
+        "name: {}\nenv_file: {}\nrun:\n  cmd: [\"echo\", \"configure run.cmd in runvault.yaml\"]\n  clear_env: true\n",
+        yaml_quote(&name),
+        yaml_quote_path(&env_file)
+    );
+
+    std::fs::write(&profile_path, yaml).map_err(|source| Error::WriteFile {
+        path: profile_path.clone(),
+        source,
+    })?;
+
+    Ok(profile_path)
+}
+
+fn infer_profile_name(dir: &Path) -> String {
+    dir.file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("profile")
+        .to_string()
+}
+
+fn yaml_quote(value: &str) -> String {
+    format!("{:?}", value)
+}
+
+fn yaml_quote_path(path: &Path) -> String {
+    yaml_quote(&path.to_string_lossy())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_ENV_FILE, DEFAULT_PROFILE_FILE, Profile, resolve_profile_path};
+    use super::{
+        CreateProfileOptions, DEFAULT_ENV_FILE, DEFAULT_PROFILE_FILE, Profile, create_profile,
+        resolve_profile_path,
+    };
     use crate::error::Error;
     use std::path::PathBuf;
     use tempfile::tempdir;
@@ -219,5 +293,64 @@ pings:
         let err = Profile::from_path(&profile_path).unwrap_err();
         assert!(matches!(err, Error::InvalidProfile(_)));
         assert!(err.to_string().contains("url must not be empty"));
+    }
+
+    #[test]
+    fn create_profile_bootstraps_folder_with_default_name() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("services");
+
+        let created = create_profile(
+            &target,
+            &CreateProfileOptions {
+                name: None,
+                env_file: PathBuf::from(DEFAULT_ENV_FILE),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(created, target.join(DEFAULT_PROFILE_FILE));
+        let content = std::fs::read_to_string(created).unwrap();
+        assert!(content.contains("name: \"services\""));
+        assert!(content.contains("env_file: \"env.sec\""));
+        assert!(content.contains("configure run.cmd in runvault.yaml"));
+    }
+
+    #[test]
+    fn create_profile_rejects_existing_profile_file() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("services");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join(DEFAULT_PROFILE_FILE), "name: existing\n").unwrap();
+
+        let err = create_profile(
+            &target,
+            &CreateProfileOptions {
+                name: None,
+                env_file: PathBuf::from(DEFAULT_ENV_FILE),
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::AlreadyExists(_)));
+    }
+
+    #[test]
+    fn create_profile_uses_custom_name_and_env_file() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("workers");
+
+        let created = create_profile(
+            &target,
+            &CreateProfileOptions {
+                name: Some("ovh-workers".to_string()),
+                env_file: PathBuf::from("secrets.sec"),
+            },
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(created).unwrap();
+        assert!(content.contains("name: \"ovh-workers\""));
+        assert!(content.contains("env_file: \"secrets.sec\""));
     }
 }

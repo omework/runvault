@@ -5,7 +5,7 @@ use runvault::{
     envfile::{apply_prefix, parse_env_bytes},
     error::Error,
     password::{prompt_password_confirm, prompt_password_once},
-    profile::{Profile, resolve_profile_path},
+    profile::{CreateProfileOptions, Profile, create_profile, resolve_profile_path},
     run::{ping_profile, run_profile},
     vault::{
         FileCleanup, VaultDocument, VaultValue, load_vault_with_password, save_vault_with_password,
@@ -24,6 +24,17 @@ async fn main() {
 async fn run() -> Result<(), Error> {
     let cli = Cli::parse();
     match cli.command {
+        Command::CreateProfile(args) => {
+            let created = create_profile(
+                &args.profile,
+                &CreateProfileOptions {
+                    name: args.name,
+                    env_file: args.env_file,
+                },
+            )?;
+            println!("{}", created.display());
+            Ok(())
+        }
         Command::Encrypt(args) => {
             let input = std::fs::read(&args.input).map_err(|source| Error::ReadFile {
                 path: args.input.clone(),
