@@ -116,9 +116,30 @@ pub fn validate_env_key(value: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
+pub fn apply_prefix(
+    vars: BTreeMap<String, String>,
+    prefix: &str,
+) -> Result<BTreeMap<String, String>, Error> {
+    if prefix.is_empty() {
+        return Ok(vars);
+    }
+
+    let mut out = BTreeMap::new();
+    for (key, value) in vars {
+        let prefixed = format!("{prefix}{key}");
+        if !validate_env_key(&prefixed) {
+            return Err(Error::InvalidConfigKey(prefixed));
+        }
+        out.insert(prefixed, value);
+    }
+
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_env_bytes, validate_env_key};
+    use super::{apply_prefix, parse_env_bytes, validate_env_key};
+    use std::collections::BTreeMap;
 
     #[test]
     fn parses_env_lines() {
@@ -144,5 +165,24 @@ mod tests {
         assert!(validate_env_key("API_KEY"));
         assert!(!validate_env_key("1API_KEY"));
         assert!(!validate_env_key("API-KEY"));
+    }
+
+    #[test]
+    fn applies_prefix_to_all_keys() {
+        let vars = BTreeMap::from([
+            ("API_KEY".to_string(), "a".to_string()),
+            ("API_URL".to_string(), "b".to_string()),
+        ]);
+
+        let prefixed = apply_prefix(vars, "PROD_").unwrap();
+        assert_eq!(prefixed.get("PROD_API_KEY").unwrap(), "a");
+        assert_eq!(prefixed.get("PROD_API_URL").unwrap(), "b");
+    }
+
+    #[test]
+    fn rejects_invalid_prefixed_keys() {
+        let vars = BTreeMap::from([("API_KEY".to_string(), "a".to_string())]);
+        let err = apply_prefix(vars, "1BAD_").unwrap_err();
+        assert!(err.to_string().contains("invalid config key"));
     }
 }

@@ -12,6 +12,7 @@ pub struct Cli {
 pub enum Command {
     Encrypt(EncryptArgs),
     Set(SetArgs),
+    Import(ImportArgs),
     Delete(DeleteArgs),
     Run(ProfileArgs),
     Ping(ProfileArgs),
@@ -42,6 +43,14 @@ pub struct SetArgs {
     pub from_file: Option<PathBuf>,
     #[arg(long = "value-path", value_name = "PATH", requires = "from_file")]
     pub value_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct ImportArgs {
+    pub profile: PathBuf,
+    pub input: PathBuf,
+    #[arg(long)]
+    pub prefix: Option<String>,
 }
 
 #[derive(Debug, Args)]

@@ -2,9 +2,10 @@ use clap::Parser;
 use runvault::{
     cli::{Cli, Command},
     crypto::encrypt_env,
+    envfile::{apply_prefix, parse_env_bytes},
     error::Error,
     password::{prompt_password_confirm, prompt_password_once},
-    profile::Profile,
+    profile::{Profile, resolve_profile_path},
     run::{ping_profile, run_profile},
     vault::{VaultDocument, load_vault_with_password, save_vault_with_password},
 };
@@ -38,11 +39,12 @@ async fn run() -> Result<(), Error> {
             Ok(())
         }
         Command::Set(args) => {
-            let profile = Profile::from_path(&args.profile)?;
-            let env_path = profile.resolve_env_path(&args.profile);
+            let profile_path = resolve_profile_path(&args.profile);
+            let profile = Profile::from_path(&profile_path)?;
+            let env_path = profile.resolve_env_path(&profile_path);
             let (mut vault, password) = if env_path.exists() {
                 let password = prompt_password_once()?;
-                let vault = load_vault_with_password(&profile, &args.profile, password.clone())?;
+                let vault = load_vault_with_password(&profile, &profile_path, password.clone())?;
                 (vault, password)
             } else {
                 (VaultDocument::default(), prompt_password_confirm()?)
@@ -62,14 +64,39 @@ async fn run() -> Result<(), Error> {
                 _ => unreachable!("clap enforces set arguments"),
             }
 
-            save_vault_with_password(&profile, &args.profile, &vault, password)
+            save_vault_with_password(&profile, &profile_path, &vault, password)
+        }
+        Command::Import(args) => {
+            let profile_path = resolve_profile_path(&args.profile);
+            let profile = Profile::from_path(&profile_path)?;
+            let env_path = profile.resolve_env_path(&profile_path);
+            let (mut vault, password) = if env_path.exists() {
+                let password = prompt_password_once()?;
+                let vault = load_vault_with_password(&profile, &profile_path, password.clone())?;
+                (vault, password)
+            } else {
+                (VaultDocument::default(), prompt_password_confirm()?)
+            };
+
+            let input = std::fs::read(&args.input).map_err(|source| Error::ReadFile {
+                path: args.input.clone(),
+                source,
+            })?;
+            let vars = parse_env_bytes(&input)?;
+            let vars = apply_prefix(vars, args.prefix.as_deref().unwrap_or(""))?;
+            for (key, value) in vars {
+                vault.set_plain_text(&key, value)?;
+            }
+
+            save_vault_with_password(&profile, &profile_path, &vault, password)
         }
         Command::Delete(args) => {
-            let profile = Profile::from_path(&args.profile)?;
+            let profile_path = resolve_profile_path(&args.profile);
+            let profile = Profile::from_path(&profile_path)?;
             let password = prompt_password_once()?;
-            let mut vault = load_vault_with_password(&profile, &args.profile, password.clone())?;
+            let mut vault = load_vault_with_password(&profile, &profile_path, password.clone())?;
             vault.delete(&args.key)?;
-            save_vault_with_password(&profile, &args.profile, &vault, password)
+            save_vault_with_password(&profile, &profile_path, &vault, password)
         }
         Command::Run(args) => run_profile(&args.profile).await,
         Command::Ping(args) => ping_profile(&args.profile).await,
@@ -78,6 +105,9 @@ async fn run() -> Result<(), Error> {
 
 fn default_encrypted_path(input: &PathBuf) -> PathBuf {
     if let Some(file_name) = input.file_name().and_then(|value| value.to_str()) {
+        if matches!(file_name, ".env" | "env") {
+            return input.with_file_name("env.sec");
+        }
         return input.with_file_name(format!("{}.enc", file_name));
     }
     input.with_extension("enc")

@@ -3,9 +3,13 @@ use std::path::{Path, PathBuf};
 
 use crate::error::Error;
 
+pub const DEFAULT_PROFILE_FILE: &str = "runvault.yaml";
+pub const DEFAULT_ENV_FILE: &str = "env.sec";
+
 #[derive(Debug, Deserialize)]
 pub struct Profile {
     pub name: String,
+    #[serde(default = "default_env_file")]
     pub env_file: PathBuf,
     #[serde(default)]
     pub workdir: Option<PathBuf>,
@@ -35,6 +39,10 @@ pub struct PingTarget {
 
 fn default_clear_env() -> bool {
     true
+}
+
+fn default_env_file() -> PathBuf {
+    PathBuf::from(DEFAULT_ENV_FILE)
 }
 
 fn default_ping_timeout_seconds() -> u64 {
@@ -99,10 +107,19 @@ impl Profile {
     }
 }
 
+pub fn resolve_profile_path(input: &Path) -> PathBuf {
+    if input.is_dir() {
+        input.join(DEFAULT_PROFILE_FILE)
+    } else {
+        input.to_path_buf()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Profile;
+    use super::{DEFAULT_ENV_FILE, DEFAULT_PROFILE_FILE, Profile, resolve_profile_path};
     use crate::error::Error;
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     #[test]
@@ -128,6 +145,37 @@ run:
             dir.path().join("secrets.env.enc")
         );
         assert!(profile.run.clear_env);
+    }
+
+    #[test]
+    fn defaults_env_file_to_env_sec_when_omitted() {
+        let dir = tempdir().unwrap();
+        let profile_path = dir.path().join(DEFAULT_PROFILE_FILE);
+        std::fs::write(
+            &profile_path,
+            r#"
+name: local
+run:
+  cmd: ["cargo", "run"]
+"#,
+        )
+        .unwrap();
+
+        let profile = Profile::from_path(&profile_path).unwrap();
+        assert_eq!(profile.env_file, PathBuf::from(DEFAULT_ENV_FILE));
+        assert_eq!(
+            profile.resolve_env_path(&profile_path),
+            dir.path().join(DEFAULT_ENV_FILE)
+        );
+    }
+
+    #[test]
+    fn resolves_directory_input_to_default_profile_file() {
+        let dir = tempdir().unwrap();
+        assert_eq!(
+            resolve_profile_path(dir.path()),
+            dir.path().join(DEFAULT_PROFILE_FILE)
+        );
     }
 
     #[test]
