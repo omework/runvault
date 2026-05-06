@@ -1,6 +1,6 @@
 use clap::Parser;
 use runvault::{
-    cli::{Cli, Command},
+    cli::{CacheSubcommand, Cli, Command},
     crypto::encrypt_env,
     envfile::{apply_prefix, parse_env_bytes},
     error::Error,
@@ -10,6 +10,9 @@ use runvault::{
         resolve_profile_path, save_profile_to_path,
     },
     run::{ping_profile, run_profile},
+    secure_store::{
+        clear_all_passwords, clear_password, load_password as load_secure_password, store_password,
+    },
     vault::{VaultDocument, VaultValue, load_vault_with_password, save_vault_with_password},
 };
 use std::{io::Write, path::PathBuf};
@@ -36,6 +39,15 @@ async fn run() -> Result<(), Error> {
             println!("{}", created.display());
             Ok(())
         }
+        Command::Cache(args) => match args.command {
+            CacheSubcommand::Clear(args) => {
+                if let Some(profile) = args.profile {
+                    clear_password(&resolve_profile_path(&profile))
+                } else {
+                    clear_all_passwords()
+                }
+            }
+        },
         Command::Encrypt(args) => {
             let input = std::fs::read(&args.input).map_err(|source| Error::ReadFile {
                 path: args.input.clone(),
@@ -57,11 +69,13 @@ async fn run() -> Result<(), Error> {
             let mut profile = Profile::from_path(&profile_path)?;
             let env_path = profile.resolve_env_path(&profile_path);
             let (mut vault, password) = if env_path.exists() {
-                let password = prompt_password_once()?;
-                let vault = load_vault_with_password(&profile, &profile_path, password.clone())?;
+                let (vault, password) = load_vault_with_lazy_password(&profile, &profile_path)?;
                 (vault, password)
             } else {
-                (VaultDocument::default(), prompt_password_confirm()?)
+                (
+                    VaultDocument::default(),
+                    password_for_new_vault(&profile_path)?,
+                )
             };
 
             let mode = args
@@ -142,11 +156,13 @@ async fn run() -> Result<(), Error> {
             let mut profile = Profile::from_path(&profile_path)?;
             let env_path = profile.resolve_env_path(&profile_path);
             let (mut vault, password) = if env_path.exists() {
-                let password = prompt_password_once()?;
-                let vault = load_vault_with_password(&profile, &profile_path, password.clone())?;
+                let (vault, password) = load_vault_with_lazy_password(&profile, &profile_path)?;
                 (vault, password)
             } else {
-                (VaultDocument::default(), prompt_password_confirm()?)
+                (
+                    VaultDocument::default(),
+                    password_for_new_vault(&profile_path)?,
+                )
             };
 
             let input = std::fs::read(&args.input).map_err(|source| Error::ReadFile {
@@ -166,8 +182,7 @@ async fn run() -> Result<(), Error> {
         Command::Delete(args) => {
             let profile_path = resolve_profile_path(&args.profile);
             let mut profile = Profile::from_path(&profile_path)?;
-            let password = prompt_password_once()?;
-            let mut vault = load_vault_with_password(&profile, &profile_path, password.clone())?;
+            let (mut vault, password) = load_vault_with_lazy_password(&profile, &profile_path)?;
             vault.delete(&args.key)?;
             profile.remove_file_spec(&args.key);
             save_profile_to_path(&profile_path, &profile)?;
@@ -176,8 +191,7 @@ async fn run() -> Result<(), Error> {
         Command::Reveal(args) => {
             let profile_path = resolve_profile_path(&args.profile);
             let profile = Profile::from_path(&profile_path)?;
-            let password = prompt_password_once()?;
-            let vault = load_vault_with_password(&profile, &profile_path, password)?;
+            let (vault, _) = load_vault_with_lazy_password(&profile, &profile_path)?;
             let value = vault
                 .entries()
                 .get(&args.key)
@@ -193,6 +207,39 @@ async fn run() -> Result<(), Error> {
         Command::Run(args) => run_profile(&args.profile).await,
         Command::Ping(args) => ping_profile(&args.profile).await,
     }
+}
+
+fn load_vault_with_lazy_password(
+    profile: &Profile,
+    profile_path: &PathBuf,
+) -> Result<(VaultDocument, age::secrecy::SecretString), Error> {
+    if let Some(password) = load_secure_password(profile_path)? {
+        match load_vault_with_password(profile, profile_path, password.clone()) {
+            Ok(vault) => {
+                store_password(profile_path, &password)?;
+                return Ok((vault, password));
+            }
+            Err(Error::Decryption(_)) => {
+                clear_password(profile_path)?;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    let password = prompt_password_once()?;
+    let vault = load_vault_with_password(profile, profile_path, password.clone())?;
+    store_password(profile_path, &password)?;
+    Ok((vault, password))
+}
+
+fn password_for_new_vault(profile_path: &PathBuf) -> Result<age::secrecy::SecretString, Error> {
+    if let Some(password) = load_secure_password(profile_path)? {
+        store_password(profile_path, &password)?;
+        return Ok(password);
+    }
+    let password = prompt_password_confirm()?;
+    store_password(profile_path, &password)?;
+    Ok(password)
 }
 
 fn reveal_value(

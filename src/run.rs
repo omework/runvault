@@ -14,6 +14,7 @@ use crate::{
     password::prompt_password_once,
     ping::{ping_target_once, ping_targets},
     profile::{FileCleanup, Profile, parse_file_mode, resolve_profile_path},
+    secure_store::{clear_password, load_password as load_secure_password, store_password},
     vault::{VaultValue, load_vault_with_password},
 };
 
@@ -126,8 +127,23 @@ fn load_profile_env_prompt(
     profile: &Profile,
     profile_path: &Path,
 ) -> Result<LoadedProfileEnv, Error> {
+    if let Some(password) = load_secure_password(profile_path)? {
+        match load_profile_env_with_password(profile, profile_path, password.clone()) {
+            Ok(loaded) => {
+                store_password(profile_path, &password)?;
+                return Ok(loaded);
+            }
+            Err(Error::Decryption(_)) => {
+                clear_password(profile_path)?;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
     let password = prompt_password_once()?;
-    load_profile_env_with_password(profile, profile_path, password)
+    let loaded = load_profile_env_with_password(profile, profile_path, password.clone())?;
+    store_password(profile_path, &password)?;
+    Ok(loaded)
 }
 
 fn load_profile_env_with_password(

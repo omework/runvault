@@ -11,6 +11,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     CreateProfile(CreateProfileArgs),
+    Cache(CacheCommand),
     Encrypt(EncryptArgs),
     Set(SetArgs),
     Import(ImportArgs),
@@ -18,6 +19,22 @@ pub enum Command {
     Reveal(RevealArgs),
     Run(ProfileArgs),
     Ping(ProfileArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CacheCommand {
+    #[command(subcommand)]
+    pub command: CacheSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CacheSubcommand {
+    Clear(CacheClearArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CacheClearArgs {
+    pub profile: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

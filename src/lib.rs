@@ -6,4 +6,5 @@ pub mod password;
 pub mod ping;
 pub mod profile;
 pub mod run;
+pub mod secure_store;
 pub mod vault;

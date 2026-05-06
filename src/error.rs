@@ -58,6 +58,8 @@ pub enum Error {
     FileSourceNotUtf8 { path: PathBuf },
     #[error("invalid file mode '{value}', expected octal like 0600")]
     InvalidFileMode { value: String },
+    #[error("secure store error: {0}")]
+    SecureStore(String),
     #[error("http ping failed: {0}")]
     HttpPing(String),
     #[error("command exited before health checks passed")]

@@ -35,6 +35,7 @@ runvault reveal deployments/ovh/services DATABASE_URL
 runvault reveal deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS --raw
 runvault run deployments/ovh/services
 runvault ping deployments/ovh/services
+runvault cache clear deployments/ovh/services
 ```
 
 `create-profile` bootstraps the profile folder by creating:
@@ -42,6 +43,32 @@ runvault ping deployments/ovh/services
 - `runvault.yaml`
 
 It does not create `env.sec`; that file is created lazily by the first `set` or `import`.
+
+## Secure password reuse
+
+`runvault` does not keep a local fallback password cache on disk.
+
+Current behavior:
+
+- on macOS:
+  - `runvault` reuses the password from Keychain when a matching entry exists
+  - if no Keychain entry exists, it prompts
+  - once you enter a valid password, it stores it in Keychain for that profile
+- on platforms without supported system secure storage:
+  - `runvault` prompts every command
+
+So the rule is:
+
+- system secure store available -> reuse through that store
+- no secure store -> prompt
+
+You can clear a stored profile password with:
+
+```bash
+runvault cache clear deployments/ovh/services
+```
+
+On macOS this removes the matching Keychain-backed runvault entry for that profile.
 
 ## Profile format
 
