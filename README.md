@@ -24,6 +24,8 @@ runvault set deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS \
   --from-file ./gcp-service-account.json \
   --value-path .runvault/gcp-service-account.json
 runvault delete deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS
+runvault reveal deployments/ovh/services DATABASE_URL
+runvault reveal deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS --raw
 runvault run deployments/ovh/services
 runvault ping deployments/ovh/services
 ```
@@ -98,6 +100,34 @@ Behavior:
 - imported keys overwrite existing plain-text values with the same final key
 - file-backed values are not created by `import`; it is plain env text import only
 - the prefix is applied before key validation
+
+## Revealing a stored value
+
+You can inspect a stored key with:
+
+```bash
+runvault reveal deployments/ovh/services DATABASE_URL
+```
+
+Behavior:
+
+- plain-text values print directly to stdout
+- file-backed values show metadata by default:
+  - key
+  - target path
+  - size
+
+To print file-backed content directly:
+
+```bash
+runvault reveal deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS --raw
+```
+
+To write any revealed value to a file:
+
+```bash
+runvault reveal deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS --output /tmp/gcp.json
+```
 
 ## Notes
 

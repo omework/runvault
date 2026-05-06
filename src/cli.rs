@@ -14,6 +14,7 @@ pub enum Command {
     Set(SetArgs),
     Import(ImportArgs),
     Delete(DeleteArgs),
+    Reveal(RevealArgs),
     Run(ProfileArgs),
     Ping(ProfileArgs),
 }
@@ -57,6 +58,16 @@ pub struct ImportArgs {
 pub struct DeleteArgs {
     pub profile: PathBuf,
     pub key: String,
+}
+
+#[derive(Debug, Args)]
+pub struct RevealArgs {
+    pub profile: PathBuf,
+    pub key: String,
+    #[arg(long)]
+    pub raw: bool,
+    #[arg(long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
