@@ -13,8 +13,8 @@ use crate::{
     error::Error,
     password::prompt_password_once,
     ping::{ping_target_once, ping_targets},
-    profile::{Profile, resolve_profile_path},
-    vault::{FileCleanup, VaultValue, load_vault_with_password},
+    profile::{FileCleanup, Profile, parse_file_mode, resolve_profile_path},
+    vault::{VaultValue, load_vault_with_password},
 };
 
 const DEFAULT_PASS_ENV: &[&str] = &[
@@ -153,11 +153,20 @@ fn materialize_loaded_env(
                 envs.insert(key, value);
             }
             VaultValue::FileContent {
-                path,
+                path: legacy_path,
                 content,
-                mode,
-                cleanup,
+                mode: legacy_mode,
+                cleanup: legacy_cleanup,
             } => {
+                let (path, mode, cleanup) = if let Some(spec) = profile.file_spec(&key) {
+                    (
+                        spec.target_path.clone(),
+                        parse_file_mode(&spec.mode)?,
+                        spec.cleanup,
+                    )
+                } else {
+                    (legacy_path, legacy_mode, legacy_cleanup)
+                };
                 let display_path = path.to_string_lossy().to_string();
                 let resolved_path = if path.is_absolute() {
                     path.clone()
@@ -304,8 +313,8 @@ mod tests {
     };
     use crate::{
         error::Error,
-        profile::{PingTarget, Profile, RunConfig},
-        vault::{FileCleanup, VaultDocument, VaultValue, save_vault_with_password},
+        profile::{FileCleanup, FileSpec, PingTarget, Profile, RunConfig},
+        vault::{VaultDocument, VaultValue, save_vault_with_password},
     };
     use age::secrecy::SecretString;
     use std::{
@@ -323,6 +332,7 @@ mod tests {
             name: "test".to_string(),
             env_file: PathBuf::from("secret.env.enc"),
             workdir: Some(workdir),
+            files: BTreeMap::new(),
             run: RunConfig {
                 cmd: vec![
                     "/bin/sh".to_string(),
@@ -333,6 +343,7 @@ mod tests {
                 pass_env: vec![],
             },
             pings: vec![],
+            implicit_workdir: false,
         }
     }
 
@@ -485,6 +496,47 @@ run:
         );
         assert!(!runtime_secret.exists());
         assert!(!runtime_secret.parent().unwrap().exists());
+    }
+
+    #[tokio::test]
+    async fn profile_file_specs_override_legacy_file_metadata() {
+        let dir = tempdir().unwrap();
+        let output = dir.path().join("captured.txt");
+        let runtime_secret = dir.path().join("pki").join("root.crt.pem");
+        let mut profile = test_profile(dir.path().to_path_buf());
+        profile.files.insert(
+            "POSTGRES_TLS_CA_FILE".to_string(),
+            FileSpec {
+                target_path: PathBuf::from("pki/root.crt.pem"),
+                mode: "0644".to_string(),
+                cleanup: FileCleanup::Keep,
+            },
+        );
+        profile.run.cmd = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            r#"printf '%s|' "$POSTGRES_TLS_CA_FILE" > captured.txt && cat "$POSTGRES_TLS_CA_FILE" >> captured.txt"#.to_string(),
+        ];
+
+        let mut values = BTreeMap::new();
+        values.insert(
+            "POSTGRES_TLS_CA_FILE".to_string(),
+            VaultValue::FileContent {
+                path: PathBuf::from("legacy/ignored.pem"),
+                content: b"root-ca".to_vec(),
+                mode: 0o600,
+                cleanup: FileCleanup::OnExit,
+            },
+        );
+
+        let loaded = materialize_loaded_env(&profile, values).unwrap();
+        assert!(runtime_secret.exists());
+        run_profile_with_loaded_env(&profile, loaded).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(output).unwrap(),
+            "pki/root.crt.pem|root-ca"
+        );
+        assert!(runtime_secret.exists());
     }
 
     #[test]

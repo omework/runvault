@@ -1,24 +1,48 @@
-use serde::Deserialize;
-use std::path::{Path, PathBuf};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
-use crate::error::Error;
+use crate::{envfile::validate_env_key, error::Error};
 
 pub const DEFAULT_PROFILE_FILE: &str = "runvault.yaml";
 pub const DEFAULT_ENV_FILE: &str = "env.sec";
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FileCleanup {
+    #[default]
+    OnExit,
+    Keep,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileSpec {
+    pub target_path: PathBuf,
+    #[serde(default = "default_file_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub cleanup: FileCleanup,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
     pub name: String,
     #[serde(default = "default_env_file")]
     pub env_file: PathBuf,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub files: BTreeMap<String, FileSpec>,
     pub run: RunConfig,
     #[serde(default)]
     pub pings: Vec<PingTarget>,
+    #[serde(skip)]
+    pub(crate) implicit_workdir: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunConfig {
     pub cmd: Vec<String>,
     #[serde(default = "default_clear_env")]
@@ -27,7 +51,7 @@ pub struct RunConfig {
     pub pass_env: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PingTarget {
     pub name: String,
     pub url: String,
@@ -51,6 +75,10 @@ fn default_env_file() -> PathBuf {
     PathBuf::from(DEFAULT_ENV_FILE)
 }
 
+fn default_file_mode() -> String {
+    "0600".to_string()
+}
+
 fn default_ping_timeout_seconds() -> u64 {
     30
 }
@@ -70,8 +98,9 @@ impl Profile {
                 path: path.to_path_buf(),
                 source,
             })?;
+        profile.implicit_workdir = profile.workdir.is_none();
         profile.validate()?;
-        if profile.workdir.is_none() {
+        if profile.implicit_workdir {
             profile.workdir = path.parent().map(Path::to_path_buf);
         }
         Ok(profile)
@@ -85,6 +114,18 @@ impl Profile {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join(&self.env_file)
+    }
+
+    pub fn file_spec(&self, key: &str) -> Option<&FileSpec> {
+        self.files.get(key)
+    }
+
+    pub fn upsert_file_spec(&mut self, key: &str, spec: FileSpec) {
+        self.files.insert(key.to_string(), spec);
+    }
+
+    pub fn remove_file_spec(&mut self, key: &str) {
+        self.files.remove(key);
     }
 
     fn validate(&self) -> Result<(), Error> {
@@ -108,6 +149,21 @@ impl Profile {
                     ping.name
                 )));
             }
+        }
+        for (key, spec) in &self.files {
+            if !validate_env_key(key) {
+                return Err(Error::InvalidProfile(format!(
+                    "file spec key '{}' is not a valid env key",
+                    key
+                )));
+            }
+            if spec.target_path.as_os_str().is_empty() {
+                return Err(Error::InvalidProfile(format!(
+                    "file spec '{}' target_path must not be empty",
+                    key
+                )));
+            }
+            parse_file_mode(&spec.mode)?;
         }
         Ok(())
     }
@@ -156,16 +212,24 @@ pub fn create_profile(path: &Path, options: &CreateProfileOptions) -> Result<Pat
         options.env_file.clone()
     };
 
-    let yaml = format!(
-        "name: {}\nenv_file: {}\nrun:\n  cmd: [\"echo\", \"configure run.cmd in runvault.yaml\"]\n  clear_env: true\n",
-        yaml_quote(&name),
-        yaml_quote_path(&env_file)
-    );
+    let profile = Profile {
+        name,
+        env_file,
+        workdir: None,
+        files: BTreeMap::new(),
+        run: RunConfig {
+            cmd: vec![
+                "echo".to_string(),
+                "configure run.cmd in runvault.yaml".to_string(),
+            ],
+            clear_env: true,
+            pass_env: Vec::new(),
+        },
+        pings: Vec::new(),
+        implicit_workdir: true,
+    };
 
-    std::fs::write(&profile_path, yaml).map_err(|source| Error::WriteFile {
-        path: profile_path.clone(),
-        source,
-    })?;
+    save_profile_to_path(&profile_path, &profile)?;
 
     Ok(profile_path)
 }
@@ -178,22 +242,34 @@ fn infer_profile_name(dir: &Path) -> String {
         .to_string()
 }
 
-fn yaml_quote(value: &str) -> String {
-    format!("{:?}", value)
+pub fn save_profile_to_path(path: &Path, profile: &Profile) -> Result<(), Error> {
+    let mut serializable = profile.clone();
+    if serializable.implicit_workdir {
+        serializable.workdir = None;
+    }
+    let yaml = serde_yaml::to_string(&serializable)
+        .map_err(|source| Error::ProfileSerialize(source.to_string()))?;
+    std::fs::write(path, yaml).map_err(|source| Error::WriteFile {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
-fn yaml_quote_path(path: &Path) -> String {
-    yaml_quote(&path.to_string_lossy())
+pub fn parse_file_mode(value: &str) -> Result<u32, Error> {
+    let trimmed = value.trim();
+    u32::from_str_radix(trimmed, 8).map_err(|_| Error::InvalidFileMode {
+        value: trimmed.to_string(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateProfileOptions, DEFAULT_ENV_FILE, DEFAULT_PROFILE_FILE, Profile, create_profile,
-        resolve_profile_path,
+        CreateProfileOptions, DEFAULT_ENV_FILE, DEFAULT_PROFILE_FILE, FileCleanup, FileSpec,
+        Profile, create_profile, resolve_profile_path, save_profile_to_path,
     };
     use crate::error::Error;
-    use std::path::PathBuf;
+    use std::{collections::BTreeMap, path::PathBuf};
     use tempfile::tempdir;
 
     #[test]
@@ -311,8 +387,8 @@ pings:
 
         assert_eq!(created, target.join(DEFAULT_PROFILE_FILE));
         let content = std::fs::read_to_string(created).unwrap();
-        assert!(content.contains("name: \"services\""));
-        assert!(content.contains("env_file: \"env.sec\""));
+        assert!(content.contains("name: services"));
+        assert!(content.contains("env_file: env.sec"));
         assert!(content.contains("configure run.cmd in runvault.yaml"));
     }
 
@@ -350,7 +426,41 @@ pings:
         .unwrap();
 
         let content = std::fs::read_to_string(created).unwrap();
-        assert!(content.contains("name: \"ovh-workers\""));
-        assert!(content.contains("env_file: \"secrets.sec\""));
+        assert!(content.contains("name: ovh-workers"));
+        assert!(content.contains("env_file: secrets.sec"));
+    }
+
+    #[test]
+    fn save_profile_persists_file_specs() {
+        let dir = tempdir().unwrap();
+        let profile_path = dir.path().join(DEFAULT_PROFILE_FILE);
+        let mut profile = Profile {
+            name: "local".to_string(),
+            env_file: PathBuf::from(DEFAULT_ENV_FILE),
+            workdir: Some(dir.path().to_path_buf()),
+            files: BTreeMap::new(),
+            run: super::RunConfig {
+                cmd: vec!["echo".to_string(), "ok".to_string()],
+                clear_env: true,
+                pass_env: Vec::new(),
+            },
+            pings: Vec::new(),
+            implicit_workdir: true,
+        };
+        profile.upsert_file_spec(
+            "TLS_CA_FILE",
+            FileSpec {
+                target_path: PathBuf::from("/tmp/root.crt.pem"),
+                mode: "0644".to_string(),
+                cleanup: FileCleanup::Keep,
+            },
+        );
+
+        save_profile_to_path(&profile_path, &profile).unwrap();
+        let reloaded = Profile::from_path(&profile_path).unwrap();
+        let spec = reloaded.file_spec("TLS_CA_FILE").unwrap();
+        assert_eq!(spec.target_path, PathBuf::from("/tmp/root.crt.pem"));
+        assert_eq!(spec.mode, "0644");
+        assert_eq!(spec.cleanup, FileCleanup::Keep);
     }
 }

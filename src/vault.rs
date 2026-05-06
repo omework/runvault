@@ -11,7 +11,7 @@ use crate::{
     crypto::{decrypt_env, encrypt_env},
     envfile::{parse_env_bytes, validate_env_key},
     error::Error,
-    profile::Profile,
+    profile::{FileCleanup, Profile},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,12 +23,6 @@ pub enum VaultValue {
         mode: u32,
         cleanup: FileCleanup,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FileCleanup {
-    OnExit,
-    Keep,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

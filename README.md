@@ -47,12 +47,18 @@ It does not create `env.sec`; that file is created lazily by the first `set` or 
 
 ```yaml
 name: glt-market-local
+env_file: env.sec
 run:
   cmd: ["cargo", "run"]
   clear_env: true
   pass_env:
     - CARGO_HOME
     - RUSTUP_HOME
+files:
+  GOOGLE_APPLICATION_CREDENTIALS:
+    target_path: .runvault/gcp-service-account.json
+    mode: "0600"
+    cleanup: keep
 pings:
   - name: api
     url: http://127.0.0.1:8080/health
@@ -103,7 +109,18 @@ Explicit profile file paths still work.
 
 Plain text values are injected directly as environment variables.
 
-File-backed values store the file bytes encrypted in the vault and, at runtime, materialize them to the configured `--to-file` path before the target command starts. The environment variable value is that configured file path.
+File-backed values now split across the two profile artifacts:
+
+- `runvault.yaml`
+  - declares the visible file spec:
+    - key
+    - target path
+    - mode
+    - cleanup
+- `env.sec`
+  - stores the encrypted file content
+
+At runtime, `runvault` reads the file spec from `runvault.yaml`, decrypts the matching file content from `env.sec`, writes it to the configured target path, and sets the environment variable value to that configured file path.
 
 Example:
 
@@ -118,6 +135,8 @@ At runtime, `runvault` will:
 - write the encrypted file content to `<workdir>/.runvault/gcp-service-account.json`
 - set `GOOGLE_APPLICATION_CREDENTIALS=.runvault/gcp-service-account.json`
 - remove the file again after the child process exits
+
+When you use `--keep`, `runvault` writes `cleanup: keep` into `runvault.yaml` and leaves the materialized file in place after the child exits.
 
 ## Set semantics
 
@@ -164,6 +183,8 @@ Defaults:
 - mode defaults to `0600`
 - cleanup defaults to `on_exit`
 - `--keep` changes cleanup to `keep`
+
+`set ... --to-file ...` also updates `runvault.yaml` so the file spec is visible without decrypting the vault.
 
 ## Importing an existing env file
 

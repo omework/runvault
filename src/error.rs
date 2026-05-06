@@ -22,6 +22,8 @@ pub enum Error {
         #[source]
         source: serde_yaml::Error,
     },
+    #[error("failed to serialize profile: {0}")]
+    ProfileSerialize(String),
     #[error("failed to read password: {0}")]
     PasswordPrompt(#[source] std::io::Error),
     #[error("password confirmation does not match")]

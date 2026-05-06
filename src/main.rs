@@ -5,11 +5,12 @@ use runvault::{
     envfile::{apply_prefix, parse_env_bytes},
     error::Error,
     password::{prompt_password_confirm, prompt_password_once},
-    profile::{CreateProfileOptions, Profile, create_profile, resolve_profile_path},
-    run::{ping_profile, run_profile},
-    vault::{
-        FileCleanup, VaultDocument, VaultValue, load_vault_with_password, save_vault_with_password,
+    profile::{
+        CreateProfileOptions, FileCleanup, FileSpec, Profile, create_profile, parse_file_mode,
+        resolve_profile_path, save_profile_to_path,
     },
+    run::{ping_profile, run_profile},
+    vault::{VaultDocument, VaultValue, load_vault_with_password, save_vault_with_password},
 };
 use std::{io::Write, path::PathBuf};
 
@@ -53,7 +54,7 @@ async fn run() -> Result<(), Error> {
         }
         Command::Set(args) => {
             let profile_path = resolve_profile_path(&args.profile);
-            let profile = Profile::from_path(&profile_path)?;
+            let mut profile = Profile::from_path(&profile_path)?;
             let env_path = profile.resolve_env_path(&profile_path);
             let (mut vault, password) = if env_path.exists() {
                 let password = prompt_password_once()?;
@@ -76,14 +77,27 @@ async fn run() -> Result<(), Error> {
             };
 
             match (args.value, args.from_file, args.to_file) {
-                (Some(value), None, None) => vault.set_plain_text(&args.key, value)?,
-                (Some(value), None, Some(runtime_path)) => vault.set_file_content(
-                    &args.key,
-                    runtime_path,
-                    value.into_bytes(),
-                    mode,
-                    cleanup,
-                )?,
+                (Some(value), None, None) => {
+                    vault.set_plain_text(&args.key, value)?;
+                    profile.remove_file_spec(&args.key);
+                }
+                (Some(value), None, Some(runtime_path)) => {
+                    vault.set_file_content(
+                        &args.key,
+                        runtime_path.clone(),
+                        value.into_bytes(),
+                        mode,
+                        cleanup,
+                    )?;
+                    profile.upsert_file_spec(
+                        &args.key,
+                        FileSpec {
+                            target_path: runtime_path,
+                            mode: format!("{mode:04o}"),
+                            cleanup,
+                        },
+                    );
+                }
                 (None, Some(source_path), None) => {
                     let content =
                         std::fs::read(&source_path).map_err(|source| Error::ReadFile {
@@ -93,6 +107,7 @@ async fn run() -> Result<(), Error> {
                     let value = String::from_utf8(content)
                         .map_err(|_| Error::FileSourceNotUtf8 { path: source_path })?;
                     vault.set_plain_text(&args.key, value)?;
+                    profile.remove_file_spec(&args.key);
                 }
                 (None, Some(source_path), Some(runtime_path)) => {
                     let content =
@@ -100,16 +115,31 @@ async fn run() -> Result<(), Error> {
                             path: source_path,
                             source,
                         })?;
-                    vault.set_file_content(&args.key, runtime_path, content, mode, cleanup)?;
+                    vault.set_file_content(
+                        &args.key,
+                        runtime_path.clone(),
+                        content,
+                        mode,
+                        cleanup,
+                    )?;
+                    profile.upsert_file_spec(
+                        &args.key,
+                        FileSpec {
+                            target_path: runtime_path,
+                            mode: format!("{mode:04o}"),
+                            cleanup,
+                        },
+                    );
                 }
                 _ => unreachable!("clap enforces set arguments"),
             }
 
+            save_profile_to_path(&profile_path, &profile)?;
             save_vault_with_password(&profile, &profile_path, &vault, password)
         }
         Command::Import(args) => {
             let profile_path = resolve_profile_path(&args.profile);
-            let profile = Profile::from_path(&profile_path)?;
+            let mut profile = Profile::from_path(&profile_path)?;
             let env_path = profile.resolve_env_path(&profile_path);
             let (mut vault, password) = if env_path.exists() {
                 let password = prompt_password_once()?;
@@ -127,16 +157,20 @@ async fn run() -> Result<(), Error> {
             let vars = apply_prefix(vars, args.prefix.as_deref().unwrap_or(""))?;
             for (key, value) in vars {
                 vault.set_plain_text(&key, value)?;
+                profile.remove_file_spec(&key);
             }
 
+            save_profile_to_path(&profile_path, &profile)?;
             save_vault_with_password(&profile, &profile_path, &vault, password)
         }
         Command::Delete(args) => {
             let profile_path = resolve_profile_path(&args.profile);
-            let profile = Profile::from_path(&profile_path)?;
+            let mut profile = Profile::from_path(&profile_path)?;
             let password = prompt_password_once()?;
             let mut vault = load_vault_with_password(&profile, &profile_path, password.clone())?;
             vault.delete(&args.key)?;
+            profile.remove_file_spec(&args.key);
+            save_profile_to_path(&profile_path, &profile)?;
             save_vault_with_password(&profile, &profile_path, &vault, password)
         }
         Command::Reveal(args) => {
@@ -148,23 +182,23 @@ async fn run() -> Result<(), Error> {
                 .entries()
                 .get(&args.key)
                 .ok_or_else(|| Error::MissingConfigKey(args.key.clone()))?;
-            reveal_value(&args.key, value, args.raw, args.output.as_ref())
+            reveal_value(
+                &args.key,
+                value,
+                profile.file_spec(&args.key),
+                args.raw,
+                args.output.as_ref(),
+            )
         }
         Command::Run(args) => run_profile(&args.profile).await,
         Command::Ping(args) => ping_profile(&args.profile).await,
     }
 }
 
-fn parse_file_mode(value: &str) -> Result<u32, Error> {
-    let trimmed = value.trim();
-    u32::from_str_radix(trimmed, 8).map_err(|_| Error::InvalidFileMode {
-        value: trimmed.to_string(),
-    })
-}
-
 fn reveal_value(
     key: &str,
     value: &VaultValue,
+    file_spec: Option<&FileSpec>,
     raw: bool,
     output: Option<&PathBuf>,
 ) -> Result<(), Error> {
@@ -195,9 +229,17 @@ fn reveal_value(
                 stdout.write_all(content).map_err(Error::PasswordPrompt)?;
                 stdout.flush().map_err(Error::PasswordPrompt)?;
             } else {
+                let target_path = file_spec
+                    .map(|spec| spec.target_path.as_path())
+                    .unwrap_or(path.as_path());
+                let mode = file_spec
+                    .map(|spec| parse_file_mode(&spec.mode))
+                    .transpose()?
+                    .unwrap_or(*mode);
+                let cleanup = file_spec.map(|spec| spec.cleanup).unwrap_or(*cleanup);
                 println!("key: {}", key);
                 println!("kind: file");
-                println!("target_path: {}", path.display());
+                println!("target_path: {}", target_path.display());
                 println!("size_bytes: {}", content.len());
                 println!("mode: {:04o}", mode);
                 println!(
