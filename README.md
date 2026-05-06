@@ -20,9 +20,15 @@ The default folder model is:
 runvault encrypt .env
 runvault set deployments/ovh/services DATABASE_URL --value postgres://...
 runvault import deployments/ovh/services .env.example --prefix PROD_
+runvault set deployments/ovh/services TLS_KEY \
+  --value \"secret-key\" \
+  --to-file .runvault/tls/key.pem \
+  --mode 0600 \
+  --keep
 runvault set deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS \
   --from-file ./gcp-service-account.json \
-  --value-path .runvault/gcp-service-account.json
+  --to-file .runvault/gcp-service-account.json \
+  --mode 0600
 runvault delete deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS
 runvault reveal deployments/ovh/services DATABASE_URL
 runvault reveal deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS --raw
@@ -65,20 +71,67 @@ Explicit profile file paths still work.
 
 Plain text values are injected directly as environment variables.
 
-File-backed values store the file bytes encrypted in the vault and, at runtime, materialize them to the configured `--value-path` before the target command starts. The environment variable value is that configured file path.
+File-backed values store the file bytes encrypted in the vault and, at runtime, materialize them to the configured `--to-file` path before the target command starts. The environment variable value is that configured file path.
 
 Example:
 
 ```bash
 runvault set deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS \
   --from-file ./gcp-service-account.json \
-  --value-path .runvault/gcp-service-account.json
+  --to-file .runvault/gcp-service-account.json \
+  --mode 0600
 ```
 
 At runtime, `runvault` will:
 - write the encrypted file content to `<workdir>/.runvault/gcp-service-account.json`
 - set `GOOGLE_APPLICATION_CREDENTIALS=.runvault/gcp-service-account.json`
 - remove the file again after the child process exits
+
+## Set semantics
+
+`set` now separates:
+
+- input source
+  - `--value`
+  - `--from-file`
+- runtime materialization
+  - plain env value
+  - file via `--to-file`
+
+Examples:
+
+```bash
+# value -> env
+runvault set deployments/ovh/services API_KEY --value abc
+
+# file -> env (source file must be valid UTF-8)
+runvault set deployments/ovh/services TLS_CERT_PEM --from-file ./cert.pem
+
+# value -> file
+runvault set deployments/ovh/services TLS_KEY \
+  --value \"secret-key\" \
+  --to-file .runvault/tls/key.pem \
+  --mode 0600 \
+  --keep
+
+# file -> file
+runvault set deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS \
+  --from-file ./gcp-service-account.json \
+  --to-file .runvault/gcp-service-account.json \
+  --mode 0600
+```
+
+Options for file materialization:
+
+- `--to-file PATH`
+- `--mode 0600`
+- `--keep`
+
+Defaults:
+
+- mode defaults to `0600`
+- cleanup defaults to `on_exit`
+- `--keep` changes cleanup to `keep`
 
 ## Importing an existing env file
 
@@ -116,6 +169,8 @@ Behavior:
   - key
   - target path
   - size
+  - mode
+  - cleanup policy
 
 To print file-backed content directly:
 

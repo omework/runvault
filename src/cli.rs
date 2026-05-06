@@ -42,8 +42,12 @@ pub struct SetArgs {
         required_unless_present = "value"
     )]
     pub from_file: Option<PathBuf>,
-    #[arg(long = "value-path", value_name = "PATH", requires = "from_file")]
-    pub value_path: Option<PathBuf>,
+    #[arg(long = "to-file", alias = "value-path", value_name = "PATH")]
+    pub to_file: Option<PathBuf>,
+    #[arg(long, value_name = "MODE", requires = "to_file")]
+    pub mode: Option<String>,
+    #[arg(long, requires = "to_file")]
+    pub keep: bool,
 }
 
 #[derive(Debug, Args)]

@@ -14,7 +14,7 @@ use crate::{
     password::prompt_password_once,
     ping::{ping_target_once, ping_targets},
     profile::{Profile, resolve_profile_path},
-    vault::{VaultValue, load_vault_with_password},
+    vault::{FileCleanup, VaultValue, load_vault_with_password},
 };
 
 const DEFAULT_PASS_ENV: &[&str] = &[
@@ -41,6 +41,7 @@ struct LoadedProfileEnv {
 struct MountedFile {
     path: PathBuf,
     created_dirs: Vec<PathBuf>,
+    cleanup: FileCleanup,
 }
 
 pub async fn run_profile(profile_path: &Path) -> Result<(), Error> {
@@ -151,14 +152,19 @@ fn materialize_loaded_env(
             VaultValue::PlainText(value) => {
                 envs.insert(key, value);
             }
-            VaultValue::FileContent { path, content } => {
+            VaultValue::FileContent {
+                path,
+                content,
+                mode,
+                cleanup,
+            } => {
                 let display_path = path.to_string_lossy().to_string();
                 let resolved_path = if path.is_absolute() {
                     path.clone()
                 } else {
                     workdir.join(&path)
                 };
-                let mount = write_runtime_file(&resolved_path, &content)?;
+                let mount = write_runtime_file(&resolved_path, &content, mode, cleanup)?;
                 envs.insert(key, display_path);
                 mounted_files.push(mount);
             }
@@ -171,7 +177,12 @@ fn materialize_loaded_env(
     })
 }
 
-fn write_runtime_file(path: &Path, content: &[u8]) -> Result<MountedFile, Error> {
+fn write_runtime_file(
+    path: &Path,
+    content: &[u8],
+    mode: u32,
+    cleanup: FileCleanup,
+) -> Result<MountedFile, Error> {
     if path.exists() {
         return Err(Error::RuntimeFilePathExists(path.to_path_buf()));
     }
@@ -204,17 +215,21 @@ fn write_runtime_file(path: &Path, content: &[u8]) -> Result<MountedFile, Error>
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
     }
 
     Ok(MountedFile {
         path: path.to_path_buf(),
         created_dirs,
+        cleanup,
     })
 }
 
 fn cleanup_mounted_files(mounted_files: Vec<MountedFile>) {
     for mounted_file in mounted_files {
+        if mounted_file.cleanup == FileCleanup::Keep {
+            continue;
+        }
         let _ = fs::remove_file(&mounted_file.path);
         for dir in mounted_file.created_dirs.into_iter().rev() {
             match fs::remove_dir(&dir) {
@@ -283,13 +298,14 @@ async fn wait_for_pings(
 #[cfg(test)]
 mod tests {
     use super::{
-        LoadedProfileEnv, default_pass_env_keys, load_profile_env_with_password,
-        materialize_loaded_env, run_profile_with_loaded_env, wait_for_pings,
+        LoadedProfileEnv, cleanup_mounted_files, default_pass_env_keys,
+        load_profile_env_with_password, materialize_loaded_env, run_profile_with_loaded_env,
+        wait_for_pings,
     };
     use crate::{
         error::Error,
         profile::{PingTarget, Profile, RunConfig},
-        vault::{VaultDocument, VaultValue, save_vault_with_password},
+        vault::{FileCleanup, VaultDocument, VaultValue, save_vault_with_password},
     };
     use age::secrecy::SecretString;
     use std::{
@@ -453,6 +469,8 @@ run:
             VaultValue::FileContent {
                 path: PathBuf::from("runtime/gcp.json"),
                 content: br#"{"project":"demo"}"#.to_vec(),
+                mode: 0o600,
+                cleanup: FileCleanup::OnExit,
             },
         );
 
@@ -467,6 +485,28 @@ run:
         );
         assert!(!runtime_secret.exists());
         assert!(!runtime_secret.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn cleanup_mounted_files_keeps_file_when_requested() {
+        let dir = tempdir().unwrap();
+        let runtime_secret = dir.path().join("runtime").join("tls.key");
+        let profile = test_profile(dir.path().to_path_buf());
+        let mut values = BTreeMap::new();
+        values.insert(
+            "TLS_KEY_FILE".to_string(),
+            VaultValue::FileContent {
+                path: PathBuf::from("runtime/tls.key"),
+                content: b"secret-key".to_vec(),
+                mode: 0o600,
+                cleanup: FileCleanup::Keep,
+            },
+        );
+
+        let loaded = materialize_loaded_env(&profile, values).unwrap();
+        assert!(runtime_secret.exists());
+        cleanup_mounted_files(loaded.mounted_files);
+        assert!(runtime_secret.exists());
     }
 
     #[tokio::test]

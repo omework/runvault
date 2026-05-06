@@ -48,8 +48,12 @@ pub enum Error {
         #[source]
         source: base64::DecodeError,
     },
-    #[error("file-backed values require --value-path")]
+    #[error("file-backed values require --to-file")]
     MissingValuePath,
+    #[error("file source {path} is not valid utf-8 and cannot be stored as a plain env value")]
+    FileSourceNotUtf8 { path: PathBuf },
+    #[error("invalid file mode '{value}', expected octal like 0600")]
+    InvalidFileMode { value: String },
     #[error("http ping failed: {0}")]
     HttpPing(String),
     #[error("command exited before health checks passed")]

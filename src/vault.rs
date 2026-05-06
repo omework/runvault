@@ -17,7 +17,18 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VaultValue {
     PlainText(String),
-    FileContent { path: PathBuf, content: Vec<u8> },
+    FileContent {
+        path: PathBuf,
+        content: Vec<u8>,
+        mode: u32,
+        cleanup: FileCleanup,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileCleanup {
+    OnExit,
+    Keep,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -42,11 +53,45 @@ enum StoredVaultValue {
     FileContent {
         path: PathBuf,
         content_base64: String,
+        #[serde(default = "default_file_mode")]
+        mode: u32,
+        #[serde(default)]
+        cleanup: StoredFileCleanup,
     },
 }
 
 fn default_vault_version() -> u8 {
     1
+}
+
+fn default_file_mode() -> u32 {
+    0o600
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+enum StoredFileCleanup {
+    #[default]
+    OnExit,
+    Keep,
+}
+
+impl From<StoredFileCleanup> for FileCleanup {
+    fn from(value: StoredFileCleanup) -> Self {
+        match value {
+            StoredFileCleanup::OnExit => FileCleanup::OnExit,
+            StoredFileCleanup::Keep => FileCleanup::Keep,
+        }
+    }
+}
+
+impl From<FileCleanup> for StoredFileCleanup {
+    fn from(value: FileCleanup) -> Self {
+        match value {
+            FileCleanup::OnExit => StoredFileCleanup::OnExit,
+            FileCleanup::Keep => StoredFileCleanup::Keep,
+        }
+    }
 }
 
 impl VaultDocument {
@@ -62,6 +107,8 @@ impl VaultDocument {
         key: &str,
         runtime_path: PathBuf,
         content: Vec<u8>,
+        mode: u32,
+        cleanup: FileCleanup,
     ) -> Result<(), Error> {
         validate_key(key)?;
         if runtime_path.as_os_str().is_empty() {
@@ -74,6 +121,8 @@ impl VaultDocument {
             VaultValue::FileContent {
                 path: runtime_path,
                 content,
+                mode,
+                cleanup,
             },
         );
         Ok(())
@@ -155,9 +204,16 @@ fn serialize_vault_bytes(vault: &VaultDocument) -> Result<Vec<u8>, Error> {
                     VaultValue::PlainText(value) => StoredVaultValue::PlainText {
                         value: value.clone(),
                     },
-                    VaultValue::FileContent { path, content } => StoredVaultValue::FileContent {
+                    VaultValue::FileContent {
+                        path,
+                        content,
+                        mode,
+                        cleanup,
+                    } => StoredVaultValue::FileContent {
                         path: path.clone(),
                         content_base64: STANDARD.encode(content),
+                        mode: *mode,
+                        cleanup: (*cleanup).into(),
                     },
                 };
                 (key.clone(), stored_value)
@@ -186,6 +242,8 @@ fn from_stored_vault(stored: StoredVaultDocument) -> Result<VaultDocument, Error
             StoredVaultValue::FileContent {
                 path,
                 content_base64,
+                mode,
+                cleanup,
             } => VaultValue::FileContent {
                 path,
                 content: STANDARD.decode(content_base64).map_err(|source| {
@@ -194,6 +252,8 @@ fn from_stored_vault(stored: StoredVaultDocument) -> Result<VaultDocument, Error
                         source,
                     }
                 })?,
+                mode,
+                cleanup: cleanup.into(),
             },
         };
         entries.insert(key, decoded);
@@ -213,7 +273,7 @@ fn validate_key(key: &str) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        VaultDocument, VaultValue, load_vault_with_password, parse_vault_bytes,
+        FileCleanup, VaultDocument, VaultValue, load_vault_with_password, parse_vault_bytes,
         save_vault_with_password,
     };
     use crate::profile::Profile;
@@ -258,6 +318,8 @@ run:
                 "GOOGLE_APPLICATION_CREDENTIALS",
                 PathBuf::from(".runvault/gcp.json"),
                 br#"{"project":"demo"}"#.to_vec(),
+                0o640,
+                FileCleanup::Keep,
             )
             .unwrap();
 
@@ -286,6 +348,31 @@ run:
             Some(&VaultValue::FileContent {
                 path: PathBuf::from(".runvault/gcp.json"),
                 content: br#"{"project":"demo"}"#.to_vec(),
+                mode: 0o640,
+                cleanup: FileCleanup::Keep,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_legacy_file_entry_without_mode_or_cleanup() {
+        let input = br#"
+version: 1
+entries:
+  GOOGLE_APPLICATION_CREDENTIALS:
+    kind: file_content
+    path: .runvault/gcp.json
+    content_base64: eyJwcm9qZWN0IjoiZGVtbyJ9
+"#;
+
+        let vault = parse_vault_bytes(input).unwrap();
+        assert_eq!(
+            vault.entries().get("GOOGLE_APPLICATION_CREDENTIALS"),
+            Some(&VaultValue::FileContent {
+                path: PathBuf::from(".runvault/gcp.json"),
+                content: br#"{"project":"demo"}"#.to_vec(),
+                mode: 0o600,
+                cleanup: FileCleanup::OnExit,
             })
         );
     }

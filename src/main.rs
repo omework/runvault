@@ -7,7 +7,9 @@ use runvault::{
     password::{prompt_password_confirm, prompt_password_once},
     profile::{Profile, resolve_profile_path},
     run::{ping_profile, run_profile},
-    vault::{VaultDocument, VaultValue, load_vault_with_password, save_vault_with_password},
+    vault::{
+        FileCleanup, VaultDocument, VaultValue, load_vault_with_password, save_vault_with_password,
+    },
 };
 use std::{io::Write, path::PathBuf};
 
@@ -50,17 +52,45 @@ async fn run() -> Result<(), Error> {
                 (VaultDocument::default(), prompt_password_confirm()?)
             };
 
-            match (args.value, args.from_file, args.value_path) {
+            let mode = args
+                .mode
+                .as_deref()
+                .map(parse_file_mode)
+                .transpose()?
+                .unwrap_or(0o600);
+            let cleanup = if args.keep {
+                FileCleanup::Keep
+            } else {
+                FileCleanup::OnExit
+            };
+
+            match (args.value, args.from_file, args.to_file) {
                 (Some(value), None, None) => vault.set_plain_text(&args.key, value)?,
+                (Some(value), None, Some(runtime_path)) => vault.set_file_content(
+                    &args.key,
+                    runtime_path,
+                    value.into_bytes(),
+                    mode,
+                    cleanup,
+                )?,
+                (None, Some(source_path), None) => {
+                    let content =
+                        std::fs::read(&source_path).map_err(|source| Error::ReadFile {
+                            path: source_path.clone(),
+                            source,
+                        })?;
+                    let value = String::from_utf8(content)
+                        .map_err(|_| Error::FileSourceNotUtf8 { path: source_path })?;
+                    vault.set_plain_text(&args.key, value)?;
+                }
                 (None, Some(source_path), Some(runtime_path)) => {
                     let content =
                         std::fs::read(&source_path).map_err(|source| Error::ReadFile {
                             path: source_path,
                             source,
                         })?;
-                    vault.set_file_content(&args.key, runtime_path, content)?;
+                    vault.set_file_content(&args.key, runtime_path, content, mode, cleanup)?;
                 }
-                (None, Some(_), None) => return Err(Error::MissingValuePath),
                 _ => unreachable!("clap enforces set arguments"),
             }
 
@@ -114,6 +144,13 @@ async fn run() -> Result<(), Error> {
     }
 }
 
+fn parse_file_mode(value: &str) -> Result<u32, Error> {
+    let trimmed = value.trim();
+    u32::from_str_radix(trimmed, 8).map_err(|_| Error::InvalidFileMode {
+        value: trimmed.to_string(),
+    })
+}
+
 fn reveal_value(
     key: &str,
     value: &VaultValue,
@@ -131,7 +168,12 @@ fn reveal_value(
                 println!("{}", text);
             }
         }
-        VaultValue::FileContent { path, content } => {
+        VaultValue::FileContent {
+            path,
+            content,
+            mode,
+            cleanup,
+        } => {
             if let Some(output_path) = output {
                 std::fs::write(output_path, content).map_err(|source| Error::WriteFile {
                     path: output_path.clone(),
@@ -146,6 +188,14 @@ fn reveal_value(
                 println!("kind: file");
                 println!("target_path: {}", path.display());
                 println!("size_bytes: {}", content.len());
+                println!("mode: {:04o}", mode);
+                println!(
+                    "cleanup: {}",
+                    match cleanup {
+                        FileCleanup::OnExit => "on_exit",
+                        FileCleanup::Keep => "keep",
+                    }
+                );
             }
         }
     }
