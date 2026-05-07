@@ -152,7 +152,7 @@ async fn run() -> Result<(), Error> {
             save_vault_with_password(&profile, &profile_path, &vault, password)
         }
         Command::Import(args) => {
-            let (profile_input, input_path) = args.resolve();
+            let (profile_input, input_paths) = args.resolve();
             let profile_path = resolve_profile_path(&profile_input);
             let mut profile = Profile::from_path(&profile_path)?;
             let env_path = profile.resolve_env_path(&profile_path);
@@ -166,44 +166,46 @@ async fn run() -> Result<(), Error> {
                 )
             };
 
-            let input = std::fs::read(&input_path).map_err(|source| Error::ReadFile {
-                path: input_path.clone(),
-                source,
-            })?;
-            let input_dir = input_path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf();
-            let vars = parse_env_bytes(&input)?;
-            let vars = apply_prefix(vars, args.prefix.as_deref().unwrap_or(""))?;
             let mut referenced_specs: BTreeMap<(PathBuf, String), FileImportSpec> = BTreeMap::new();
-            for (key, value) in vars {
-                if let Some(reference) = parse_reference_value(&value) {
-                    let mut reference_path = expand_user_home(Path::new(&reference));
-                    if reference_path.is_relative() {
-                        reference_path = input_dir.join(reference_path);
-                    }
-                    let spec = if let Some(spec) =
-                        referenced_specs.get(&(reference_path.clone(), key.clone()))
-                    {
-                        spec.clone()
+            for input_path in input_paths {
+                let input = std::fs::read(&input_path).map_err(|source| Error::ReadFile {
+                    path: input_path.clone(),
+                    source,
+                })?;
+                let input_dir = input_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .to_path_buf();
+                let vars = parse_env_bytes(&input)?;
+                let vars = apply_prefix(vars, args.prefix.as_deref().unwrap_or(""))?;
+                for (key, value) in vars {
+                    if let Some(reference) = parse_reference_value(&value) {
+                        let mut reference_path = expand_user_home(Path::new(&reference));
+                        if reference_path.is_relative() {
+                            reference_path = input_dir.join(reference_path);
+                        }
+                        let spec = if let Some(spec) =
+                            referenced_specs.get(&(reference_path.clone(), key.clone()))
+                        {
+                            spec.clone()
+                        } else {
+                            let document = load_file_import_document(&reference_path)?;
+                            let spec = document.files.get(&key).cloned().ok_or_else(|| {
+                                Error::InvalidImportSpec(format!(
+                                    "reference file '{}' does not define key '{}'",
+                                    reference_path.display(),
+                                    key
+                                ))
+                            })?;
+                            referenced_specs
+                                .insert((reference_path.clone(), key.clone()), spec.clone());
+                            spec
+                        };
+                        apply_file_import_spec(&mut profile, &mut vault, &key, spec)?;
                     } else {
-                        let document = load_file_import_document(&reference_path)?;
-                        let spec = document.files.get(&key).cloned().ok_or_else(|| {
-                            Error::InvalidImportSpec(format!(
-                                "reference file '{}' does not define key '{}'",
-                                reference_path.display(),
-                                key
-                            ))
-                        })?;
-                        referenced_specs
-                            .insert((reference_path.clone(), key.clone()), spec.clone());
-                        spec
-                    };
-                    apply_file_import_spec(&mut profile, &mut vault, &key, spec)?;
-                } else {
-                    vault.set_plain_text(&key, value)?;
-                    profile.remove_file_spec(&key);
+                        vault.set_plain_text(&key, value)?;
+                        profile.remove_file_spec(&key);
+                    }
                 }
             }
 
@@ -211,7 +213,7 @@ async fn run() -> Result<(), Error> {
             save_vault_with_password(&profile, &profile_path, &vault, password)
         }
         Command::ImportFiles(args) => {
-            let (profile_input, input_path) = args.resolve();
+            let (profile_input, input_paths) = args.resolve();
             let profile_path = resolve_profile_path(&profile_input);
             let mut profile = Profile::from_path(&profile_path)?;
             let env_path = profile.resolve_env_path(&profile_path);
@@ -225,9 +227,11 @@ async fn run() -> Result<(), Error> {
                 )
             };
 
-            let document = load_file_import_document(&input_path)?;
-            for (key, spec) in document.files {
-                apply_file_import_spec(&mut profile, &mut vault, &key, spec)?;
+            for input_path in input_paths {
+                let document = load_file_import_document(&input_path)?;
+                for (key, spec) in document.files {
+                    apply_file_import_spec(&mut profile, &mut vault, &key, spec)?;
+                }
             }
 
             save_profile_to_path(&profile_path, &profile)?;

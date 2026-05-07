@@ -82,7 +82,7 @@ pub struct SetArgs {
 
 #[derive(Debug, Args)]
 pub struct ImportArgs {
-    #[arg(value_name = "PROFILE_OR_INPUT", num_args = 1..=2)]
+    #[arg(value_name = "PROFILE_OR_INPUT", num_args = 1..)]
     pub targets: Vec<PathBuf>,
     #[arg(long)]
     pub prefix: Option<String>,
@@ -90,7 +90,7 @@ pub struct ImportArgs {
 
 #[derive(Debug, Args)]
 pub struct ImportFilesArgs {
-    #[arg(value_name = "PROFILE_OR_INPUT", num_args = 1..=2)]
+    #[arg(value_name = "PROFILE_OR_INPUT", num_args = 1..)]
     pub targets: Vec<PathBuf>,
 }
 
@@ -142,21 +142,21 @@ impl SetArgs {
 }
 
 impl ImportArgs {
-    pub fn resolve(&self) -> (PathBuf, PathBuf) {
+    pub fn resolve(&self) -> (PathBuf, Vec<PathBuf>) {
         match self.targets.as_slice() {
-            [input] => (PathBuf::from(DEFAULT_PROFILE_DIR), input.clone()),
-            [profile, input] => (profile.clone(), input.clone()),
-            _ => unreachable!("clap enforces import target arity"),
+            [input] => (PathBuf::from(DEFAULT_PROFILE_DIR), vec![input.clone()]),
+            [first, rest @ ..] if looks_like_profile_path(first) => (first.clone(), rest.to_vec()),
+            inputs => (PathBuf::from(DEFAULT_PROFILE_DIR), inputs.to_vec()),
         }
     }
 }
 
 impl ImportFilesArgs {
-    pub fn resolve(&self) -> (PathBuf, PathBuf) {
+    pub fn resolve(&self) -> (PathBuf, Vec<PathBuf>) {
         match self.targets.as_slice() {
-            [input] => (PathBuf::from(DEFAULT_PROFILE_DIR), input.clone()),
-            [profile, input] => (profile.clone(), input.clone()),
-            _ => unreachable!("clap enforces import-files target arity"),
+            [input] => (PathBuf::from(DEFAULT_PROFILE_DIR), vec![input.clone()]),
+            [first, rest @ ..] if looks_like_profile_path(first) => (first.clone(), rest.to_vec()),
+            inputs => (PathBuf::from(DEFAULT_PROFILE_DIR), inputs.to_vec()),
         }
     }
 }
@@ -186,5 +186,98 @@ impl ProfileArgs {
         self.profile
             .clone()
             .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR))
+    }
+}
+
+fn looks_like_profile_path(path: &PathBuf) -> bool {
+    if path.file_name().is_some_and(|name| name == "runvault.yaml") {
+        return true;
+    }
+
+    path.join("runvault.yaml").exists()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Command, DEFAULT_PROFILE_DIR};
+    use clap::Parser;
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[test]
+    fn import_defaults_to_dot_vault_for_multiple_inputs() {
+        let cli = Cli::try_parse_from(["runvault", "import", ".env", ".env.local"]).unwrap();
+
+        let Command::Import(args) = cli.command else {
+            panic!("expected import command");
+        };
+
+        let (profile, inputs) = args.resolve();
+        assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
+        assert_eq!(
+            inputs,
+            vec![PathBuf::from(".env"), PathBuf::from(".env.local")]
+        );
+    }
+
+    #[test]
+    fn import_uses_explicit_profile_when_runvault_yaml_exists() {
+        let profile_dir = unique_temp_dir("runvault-cli-import-profile");
+        fs::create_dir_all(&profile_dir).unwrap();
+        fs::write(
+            profile_dir.join("runvault.yaml"),
+            "name: test\nrun:\n  cmd: [\"true\"]\n",
+        )
+        .unwrap();
+
+        let cli = Cli::try_parse_from([
+            "runvault",
+            "import",
+            profile_dir.to_str().unwrap(),
+            ".env",
+            ".env.local",
+        ])
+        .unwrap();
+
+        let Command::Import(args) = cli.command else {
+            panic!("expected import command");
+        };
+
+        let (profile, inputs) = args.resolve();
+        assert_eq!(profile, profile_dir);
+        assert_eq!(
+            inputs,
+            vec![PathBuf::from(".env"), PathBuf::from(".env.local")]
+        );
+    }
+
+    #[test]
+    fn import_files_defaults_to_dot_vault_for_multiple_specs() {
+        let cli = Cli::try_parse_from(["runvault", "import-files", "files-a.yaml", "files-b.yaml"])
+            .unwrap();
+
+        let Command::ImportFiles(args) = cli.command else {
+            panic!("expected import-files command");
+        };
+
+        let (profile, inputs) = args.resolve();
+        assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
+        assert_eq!(
+            inputs,
+            vec![PathBuf::from("files-a.yaml"), PathBuf::from("files-b.yaml")]
+        );
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        path.push(format!("{prefix}-{nanos}"));
+        path
     }
 }

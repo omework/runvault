@@ -28,10 +28,10 @@ runvault create-profile deployments/ovh/services
 runvault encrypt .env
 runvault set DATABASE_URL --value postgres://...
 runvault set deployments/ovh/services DATABASE_URL --value postgres://...
-runvault import .env.example --prefix PROD_
-runvault import deployments/ovh/services .env.example --prefix PROD_
-runvault import-files files-spec.yaml
-runvault import-files deployments/ovh/services files-spec.yaml
+runvault import .env.example .env.local --prefix PROD_
+runvault import deployments/ovh/services .env.example .env.local --prefix PROD_
+runvault import-files files-spec.yaml tls-files.yaml
+runvault import-files deployments/ovh/services files-spec.yaml tls-files.yaml
 runvault set deployments/ovh/services TLS_KEY \
   --value \"secret-key\" \
   --to-file .runvault/tls/key.pem \
@@ -238,15 +238,24 @@ You can bulk-load an existing dotenv-style file into the encrypted vault:
 runvault import deployments/ovh/services .env.example
 ```
 
+You can also import multiple dotenv files in one call. Shell wildcards work naturally because the shell expands them before `runvault` sees the arguments:
+
+```bash
+runvault import deployments/ovh/services .env .env.local
+runvault import deployments/ovh/services .env.*
+```
+
 You can also add a prefix to every imported key before it is stored:
 
 ```bash
-runvault import deployments/ovh/services .env.example --prefix PROD_
+runvault import deployments/ovh/services .env.example .env.local --prefix PROD_
 ```
 
 Behavior:
 
 - dotenv content is parsed with the same parser used for legacy env payloads
+- multiple input files are imported from left to right
+- later files overwrite earlier keys when they define the same final key
 - imported keys overwrite existing plain-text values with the same final key
 - `import` also understands inline file-spec references in env values
 - the prefix is applied before key validation
@@ -277,6 +286,12 @@ You can bulk-load file-backed values from a YAML file:
 runvault import-files deployments/ovh/services files-spec.yaml
 ```
 
+You can also import multiple spec files:
+
+```bash
+runvault import-files deployments/ovh/services files-spec.yaml certs/*.yaml
+```
+
 Spec format:
 
 ```yaml
@@ -298,6 +313,8 @@ files:
 Behavior:
 
 - `src` is read from disk when you run the command
+- multiple spec files are imported from left to right
+- later spec files overwrite earlier keys when they define the same env var
 - with `to-file`, encrypted file content is stored in `env.sec` and the visible file spec is mirrored into `runvault.yaml`
 - without `to-file`, the source file content is imported as a plain env value
 - when importing as a plain env value, the source file must be valid UTF-8
