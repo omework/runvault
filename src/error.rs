@@ -28,8 +28,16 @@ pub enum Error {
         #[source]
         source: serde_yaml::Error,
     },
+    #[error("failed to parse bundle {path}: {source}")]
+    BundleParse {
+        path: PathBuf,
+        #[source]
+        source: serde_yaml::Error,
+    },
     #[error("failed to serialize profile: {0}")]
     ProfileSerialize(String),
+    #[error("failed to serialize bundle: {0}")]
+    BundleSerialize(String),
     #[error("failed to read password: {0}")]
     PasswordPrompt(#[source] std::io::Error),
     #[error("password confirmation does not match")]
@@ -86,6 +94,8 @@ pub enum Error {
     ChildExitedEarly,
     #[error("runtime file path already exists: {0}")]
     RuntimeFilePathExists(PathBuf),
+    #[error("bundle is invalid: {0}")]
+    InvalidBundle(String),
     #[error("command failed with status {0}")]
     CommandFailed(String),
 }

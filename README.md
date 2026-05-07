@@ -25,6 +25,8 @@ If you omit the profile path, `runvault` now defaults to:
 ```bash
 runvault create-profile
 runvault create-profile deployments/ovh/services
+runvault bundle services.bundle.yaml --version v1.0.0 --description "OVH services profile"
+runvault run-bundle services.bundle.yaml
 runvault encrypt .env
 runvault jwt JWT_SIGNING_SECRET --issuer runvault --audience tempo --subject worker --ttl 15m
 runvault set DATABASE_URL --value postgres://...
@@ -33,12 +35,12 @@ runvault import .env.example .env.local --prefix PROD_
 runvault import deployments/ovh/services .env.example .env.local --prefix PROD_
 runvault import-files files-spec.yaml tls-files.yaml
 runvault import-files deployments/ovh/services files-spec.yaml tls-files.yaml
+runvault run set -- docker compose up -d
 runvault ping add api http://127.0.0.1:8080/health
 runvault set deployments/ovh/services TLS_KEY \
   --value \"secret-key\" \
   --to-file .runvault/tls/key.pem \
-  --mode 0600 \
-  --keep
+  --mode 0600
 runvault set deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS \
   --from-file ./gcp-service-account.json \
   --to-file .runvault/gcp-service-account.json \
@@ -134,6 +136,19 @@ run:
 
 Edit that before you rely on `runvault run`.
 
+You can also set the run command from the CLI:
+
+```bash
+runvault run set -- docker compose up -d
+runvault run set vault -- docker compose up -d
+runvault run set . -- /usr/local/bin/my-service --port 8080
+```
+
+Why `--`:
+
+- everything before `--` is parsed as `runvault` arguments
+- everything after `--` is stored verbatim as `run.cmd`
+
 If a command input path is a directory, `runvault` resolves:
 
 - `runvault.yaml` as the profile file
@@ -144,6 +159,36 @@ Explicit profile file paths still work.
 If no profile path is provided for profile-based commands, `runvault` uses `./.vault`.
 
 If `./.vault` does not exist yet, `runvault` bootstraps it automatically the first time you use an implicit default-profile command.
+
+## Bundling a profile
+
+You can package a profile into a single file that contains:
+
+- bundle metadata
+- the profile YAML
+- the encrypted `env.sec` payload
+
+Export a bundle with:
+
+```bash
+runvault bundle services.bundle.yaml
+runvault bundle deployments/ovh/services/vault services.bundle.yaml \
+  --version v1.0.0 \
+  --description "OVH services deployment"
+```
+
+Run it later with:
+
+```bash
+runvault run-bundle services.bundle.yaml
+```
+
+Behavior:
+
+- `bundle` defaults to `./.vault` if no profile is specified
+- `run-bundle` unpacks into a temporary profile directory and runs from there
+- password reuse for `run-bundle` is keyed off the bundle file path, not the temporary extraction path
+- the bundle contains only the runvault profile and encrypted env payload, not unrelated app files such as `docker-compose.yml`
 
 ## Managing ping targets
 
@@ -197,9 +242,9 @@ runvault set deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS \
 At runtime, `runvault` will:
 - write the encrypted file content to `<workdir>/.runvault/gcp-service-account.json`
 - set `GOOGLE_APPLICATION_CREDENTIALS=.runvault/gcp-service-account.json`
-- remove the file again after the child process exits
+- keep the file in place by default
 
-When you use `--keep`, `runvault` writes `cleanup: keep` into `runvault.yaml` and leaves the materialized file in place after the child exits.
+If you want an ephemeral runtime file instead, use `--on-exit`. That writes `cleanup: on_exit` into `runvault.yaml` and removes the materialized file after the child exits.
 
 ## Set semantics
 
@@ -228,14 +273,19 @@ runvault set deployments/ovh/services TLS_CERT_PEM --from-file ./cert.pem
 runvault set deployments/ovh/services TLS_KEY \
   --value \"secret-key\" \
   --to-file .runvault/tls/key.pem \
-  --mode 0600 \
-  --keep
+  --mode 0600
 
 # file -> file
 runvault set deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS \
   --from-file ./gcp-service-account.json \
   --to-file .runvault/gcp-service-account.json \
   --mode 0600
+
+# file -> file, cleaned up after the child exits
+runvault set deployments/ovh/services TEMP_COMPOSE_FILE \
+  --from-file ./docker-compose.override.yml \
+  --to-file .runvault/docker-compose.override.yml \
+  --on-exit
 ```
 
 Options for file materialization:
@@ -243,12 +293,13 @@ Options for file materialization:
 - `--to-file PATH`
 - `--mode 0600`
 - `--keep`
+- `--on-exit`
 
 Defaults:
 
 - mode defaults to `0600`
-- cleanup defaults to `on_exit`
-- `--keep` changes cleanup to `keep`
+- cleanup defaults to `keep` when `--to-file` is used
+- `--on-exit` changes cleanup to `on_exit`
 
 `set ... --to-file ...` also updates `runvault.yaml` so the file spec is visible without decrypting the vault.
 
@@ -382,6 +433,7 @@ Behavior:
 - relative `src` paths are resolved relative to the YAML spec file location
 - imported file-backed keys overwrite existing values with the same key
 - `mode` and `cleanup` are only valid when `to-file` is present
+- when `to-file` is present and `cleanup` is omitted, it defaults to `keep`
 - `~` in `src` paths is expanded against `$HOME`
 
 ## Revealing a stored value
@@ -421,5 +473,6 @@ runvault reveal deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS --output
 - the default encrypted payload file name is `env.sec`
 - plaintext env files are only used as `encrypt` input
 - `runvault` never writes decrypted plain text values back to disk
-- file-backed values are written only for the child runtime, then cleaned up
+- file-backed values persist by default when `--to-file` is used
+- use `--on-exit` or `cleanup: on_exit` for ephemeral runtime files
 - when `clear_env` is true, `runvault` keeps a small default passthrough set like `PATH`, `HOME`, `USER`, `SHELL`, and `TMPDIR`

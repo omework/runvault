@@ -1,5 +1,6 @@
 use clap::Parser;
 use runvault::{
+    bundle::{BundleExportOptions, export_bundle, load_bundle, materialize_bundle},
     cli::{CacheSubcommand, Cli, Command},
     crypto::encrypt_env,
     envfile::{apply_prefix, parse_env_bytes, parse_reference_value},
@@ -11,7 +12,7 @@ use runvault::{
         create_profile, ensure_default_profile_exists, expand_user_home, load_file_import_document,
         parse_file_mode, resolve_profile_path, save_profile_to_path,
     },
-    run::{ping_profile, run_profile},
+    run::{ping_profile, run_profile, run_profile_with_secure_store_key},
     secure_store::{
         clear_all_passwords, clear_password, load_password as load_secure_password, store_password,
     },
@@ -44,6 +45,18 @@ async fn run() -> Result<(), Error> {
             )?;
             println!("{}", created.display());
             Ok(())
+        }
+        Command::Bundle(args) => {
+            let (profile_input, output_path) = args.resolve();
+            ensure_default_profile_exists(&profile_input)?;
+            export_bundle(
+                &profile_input,
+                &output_path,
+                &BundleExportOptions {
+                    version: args.version,
+                    description: args.description,
+                },
+            )
         }
         Command::Cache(args) => match args.command {
             CacheSubcommand::Clear(args) => {
@@ -145,8 +158,12 @@ async fn run() -> Result<(), Error> {
                 .map(parse_file_mode)
                 .transpose()?
                 .unwrap_or(0o600);
-            let cleanup = if args.keep {
-                FileCleanup::Keep
+            let cleanup = if args.to_file.is_some() {
+                if args.on_exit {
+                    FileCleanup::OnExit
+                } else {
+                    FileCleanup::Keep
+                }
             } else {
                 FileCleanup::OnExit
             };
@@ -323,7 +340,22 @@ async fn run() -> Result<(), Error> {
                 args.output.as_ref(),
             )
         }
-        Command::Run(args) => run_profile(&args.profile_or_default()).await,
+        Command::Run(args) => match args.command {
+            Some(runvault::cli::RunSubcommand::Set(set)) => {
+                let (profile_input, cmd) = set.resolve();
+                ensure_default_profile_exists(&profile_input)?;
+                let profile_path = resolve_profile_path(&profile_input);
+                let mut profile = Profile::from_path(&profile_path)?;
+                profile.run.cmd = cmd;
+                save_profile_to_path(&profile_path, &profile)
+            }
+            None => run_profile(&args.profile_or_default()).await,
+        },
+        Command::RunBundle(args) => {
+            let bundle = load_bundle(&args.bundle)?;
+            let (_temp_dir, profile_path) = materialize_bundle(&bundle)?;
+            run_profile_with_secure_store_key(&profile_path, &args.bundle).await
+        }
         Command::Ping(args) => match args.command {
             Some(runvault::cli::PingSubcommand::Add(add)) => {
                 let (profile_input, name, url) = add.resolve();
@@ -355,13 +387,14 @@ fn apply_file_import_spec(
     })?;
     if let Some(target_path) = spec.to_file {
         let mode = parse_file_mode(&spec.mode)?;
-        vault.set_file_content(key, target_path.clone(), content, mode, spec.cleanup)?;
+        let cleanup = spec.cleanup.unwrap_or(FileCleanup::Keep);
+        vault.set_file_content(key, target_path.clone(), content, mode, cleanup)?;
         profile.upsert_file_spec(
             key,
             FileSpec {
                 target_path,
                 mode: spec.mode,
-                cleanup: spec.cleanup,
+                cleanup,
             },
         );
     } else {

@@ -13,6 +13,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     CreateProfile(CreateProfileArgs),
+    Bundle(BundleArgs),
     Cache(CacheCommand),
     Encrypt(EncryptArgs),
     Jwt(JwtArgs),
@@ -21,8 +22,19 @@ pub enum Command {
     ImportFiles(ImportFilesArgs),
     Delete(DeleteArgs),
     Reveal(RevealArgs),
-    Run(ProfileArgs),
+    Run(RunCommand),
+    RunBundle(RunBundleArgs),
     Ping(PingCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct BundleArgs {
+    #[arg(value_name = "PROFILE_OR_OUTPUT", num_args = 1..=2)]
+    pub targets: Vec<PathBuf>,
+    #[arg(long)]
+    pub version: Option<String>,
+    #[arg(long)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -97,8 +109,10 @@ pub struct SetArgs {
     pub to_file: Option<PathBuf>,
     #[arg(long, value_name = "MODE", requires = "to_file")]
     pub mode: Option<String>,
-    #[arg(long, requires = "to_file")]
+    #[arg(long, requires = "to_file", conflicts_with = "on_exit")]
     pub keep: bool,
+    #[arg(long = "on-exit", requires = "to_file", conflicts_with = "keep")]
+    pub on_exit: bool,
 }
 
 #[derive(Debug, Args)]
@@ -137,6 +151,29 @@ pub struct ProfileArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct RunCommand {
+    #[command(subcommand)]
+    pub command: Option<RunSubcommand>,
+    pub profile: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RunSubcommand {
+    Set(RunSetArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct RunSetArgs {
+    #[arg(trailing_var_arg = true, required = true)]
+    pub parts: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct RunBundleArgs {
+    pub bundle: PathBuf,
+}
+
+#[derive(Debug, Args)]
 pub struct PingCommand {
     #[command(subcommand)]
     pub command: Option<PingSubcommand>,
@@ -171,6 +208,16 @@ impl CreateProfileArgs {
         self.profile
             .clone()
             .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR))
+    }
+}
+
+impl BundleArgs {
+    pub fn resolve(&self) -> (PathBuf, PathBuf) {
+        match self.targets.as_slice() {
+            [output] => (PathBuf::from(DEFAULT_PROFILE_DIR), output.clone()),
+            [profile, output] => (profile.clone(), output.clone()),
+            _ => unreachable!("clap enforces bundle target arity"),
+        }
     }
 }
 
@@ -242,6 +289,34 @@ impl ProfileArgs {
     }
 }
 
+impl RunCommand {
+    pub fn profile_or_default(&self) -> PathBuf {
+        self.profile
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR))
+    }
+}
+
+impl RunSetArgs {
+    pub fn resolve(&self) -> (PathBuf, Vec<String>) {
+        match self.parts.as_slice() {
+            [cmd @ ..] if !cmd.is_empty() => {
+                let first = PathBuf::from(&cmd[0]);
+                let (profile, mut command) = if cmd.len() >= 2 && looks_like_profile_path(&first) {
+                    (first, cmd[1..].to_vec())
+                } else {
+                    (PathBuf::from(DEFAULT_PROFILE_DIR), cmd.to_vec())
+                };
+                if command.first().is_some_and(|value| value == "--") {
+                    command.remove(0);
+                }
+                (profile, command)
+            }
+            _ => unreachable!("clap enforces run set arity"),
+        }
+    }
+}
+
 impl PingCommand {
     pub fn profile_or_default(&self) -> PathBuf {
         self.profile
@@ -274,7 +349,7 @@ fn looks_like_profile_path(path: &PathBuf) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, DEFAULT_PROFILE_DIR, PingSubcommand};
+    use super::{Cli, Command, DEFAULT_PROFILE_DIR, PingSubcommand, RunSubcommand};
     use clap::Parser;
     use std::{
         fs,
@@ -335,6 +410,73 @@ mod tests {
         assert_eq!(url, "http://127.0.0.1:8080/health");
         assert_eq!(add.timeout_seconds, 30);
         assert_eq!(add.interval_millis, 500);
+    }
+
+    #[test]
+    fn run_set_defaults_to_dot_vault_and_collects_command_after_separator() {
+        let cli = Cli::try_parse_from([
+            "runvault", "run", "set", "--", "docker", "compose", "up", "-d",
+        ])
+        .unwrap();
+
+        let Command::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+        let Some(RunSubcommand::Set(set)) = args.command else {
+            panic!("expected run set subcommand");
+        };
+
+        let (profile, cmd) = set.resolve();
+        assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
+        assert_eq!(cmd, vec!["docker", "compose", "up", "-d"]);
+    }
+
+    #[test]
+    fn run_set_uses_explicit_profile_before_separator_when_profile_exists() {
+        let profile_dir = unique_temp_dir("runvault-cli-run-set-profile");
+        fs::create_dir_all(&profile_dir).unwrap();
+        fs::write(
+            profile_dir.join("runvault.yaml"),
+            "name: test\nrun:\n  cmd: [\"true\"]\n",
+        )
+        .unwrap();
+
+        let cli = Cli::try_parse_from([
+            "runvault",
+            "run",
+            "set",
+            profile_dir.to_str().unwrap(),
+            "--",
+            "docker",
+            "compose",
+            "up",
+            "-d",
+        ])
+        .unwrap();
+
+        let Command::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+        let Some(RunSubcommand::Set(set)) = args.command else {
+            panic!("expected run set subcommand");
+        };
+
+        let (profile, cmd) = set.resolve();
+        assert_eq!(profile, profile_dir);
+        assert_eq!(cmd, vec!["docker", "compose", "up", "-d"]);
+    }
+
+    #[test]
+    fn bundle_export_defaults_to_dot_vault_for_output_path() {
+        let cli = Cli::try_parse_from(["runvault", "bundle", "profile.bundle.yaml"]).unwrap();
+
+        let Command::Bundle(args) = cli.command else {
+            panic!("expected bundle command");
+        };
+
+        let (profile, output) = args.resolve();
+        assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
+        assert_eq!(output, PathBuf::from("profile.bundle.yaml"));
     }
 
     #[test]

@@ -48,10 +48,17 @@ struct MountedFile {
 }
 
 pub async fn run_profile(profile_path: &Path) -> Result<(), Error> {
+    run_profile_with_secure_store_key(profile_path, profile_path).await
+}
+
+pub async fn run_profile_with_secure_store_key(
+    profile_path: &Path,
+    secure_store_key: &Path,
+) -> Result<(), Error> {
     ensure_default_profile_exists(profile_path)?;
     let profile_path = resolve_profile_path(profile_path);
     let profile = Profile::from_path(&profile_path)?;
-    let envs = load_profile_env_prompt(&profile, &profile_path)?;
+    let envs = load_profile_env_prompt(&profile, &profile_path, secure_store_key)?;
     run_profile_with_loaded_env(&profile, envs).await
 }
 
@@ -130,15 +137,16 @@ pub async fn ping_profile(profile_path: &Path) -> Result<(), Error> {
 fn load_profile_env_prompt(
     profile: &Profile,
     profile_path: &Path,
+    secure_store_key: &Path,
 ) -> Result<LoadedProfileEnv, Error> {
-    if let Some(password) = load_secure_password(profile_path)? {
+    if let Some(password) = load_secure_password(secure_store_key)? {
         match load_profile_env_with_password(profile, profile_path, password.clone()) {
             Ok(loaded) => {
-                store_password(profile_path, &password)?;
+                store_password(secure_store_key, &password)?;
                 return Ok(loaded);
             }
             Err(Error::Decryption(_)) => {
-                clear_password(profile_path)?;
+                clear_password(secure_store_key)?;
             }
             Err(err) => return Err(err),
         }
@@ -146,7 +154,7 @@ fn load_profile_env_prompt(
 
     let password = prompt_password_once()?;
     let loaded = load_profile_env_with_password(profile, profile_path, password.clone())?;
-    store_password(profile_path, &password)?;
+    store_password(secure_store_key, &password)?;
     Ok(loaded)
 }
 

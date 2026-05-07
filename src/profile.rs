@@ -40,8 +40,8 @@ pub struct FileImportSpec {
     pub to_file: Option<PathBuf>,
     #[serde(default = "default_file_mode")]
     pub mode: String,
-    #[serde(default)]
-    pub cleanup: FileCleanup,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<FileCleanup>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -383,7 +383,7 @@ fn validate_file_import_document(document: &FileImportDocument) -> Result<(), Er
                 )));
             }
             parse_file_mode(&spec.mode)?;
-        } else if spec.mode != default_file_mode() || spec.cleanup != FileCleanup::OnExit {
+        } else if spec.mode != default_file_mode() || spec.cleanup.is_some() {
             return Err(Error::InvalidImportSpec(format!(
                 "file import '{}' uses file options without to-file",
                 key
@@ -680,7 +680,7 @@ files:
             &PathBuf::from("/home/debian/mata35/pki/root.crt.pem")
         );
         assert_eq!(spec.mode, "0644");
-        assert_eq!(spec.cleanup, FileCleanup::Keep);
+        assert_eq!(spec.cleanup, Some(FileCleanup::Keep));
     }
 
     #[test]
@@ -715,7 +715,7 @@ files:
             &PathBuf::from("/tls/service.crt.pem")
         );
         assert_eq!(spec.mode, "0600");
-        assert_eq!(spec.cleanup, FileCleanup::OnExit);
+        assert_eq!(spec.cleanup, None);
     }
 
     #[test]
@@ -733,7 +733,7 @@ files:
         assert_eq!(spec.src, PathBuf::from("./firebase.json"));
         assert_eq!(spec.to_file, None);
         assert_eq!(spec.mode, "0600");
-        assert_eq!(spec.cleanup, FileCleanup::OnExit);
+        assert_eq!(spec.cleanup, None);
     }
 
     #[test]
