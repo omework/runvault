@@ -29,7 +29,14 @@ pub struct FileSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileImportSpec {
     pub src: PathBuf,
-    pub target_path: PathBuf,
+    #[serde(
+        default,
+        rename = "to-file",
+        alias = "to_file",
+        alias = "target_path",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub to_file: Option<PathBuf>,
     #[serde(default = "default_file_mode")]
     pub mode: String,
     #[serde(default)]
@@ -317,13 +324,20 @@ fn validate_file_import_document(document: &FileImportDocument) -> Result<(), Er
                 key
             )));
         }
-        if spec.target_path.as_os_str().is_empty() {
+        if let Some(path) = &spec.to_file {
+            if path.as_os_str().is_empty() {
+                return Err(Error::InvalidImportSpec(format!(
+                    "file import '{}' to-file must not be empty",
+                    key
+                )));
+            }
+            parse_file_mode(&spec.mode)?;
+        } else if spec.mode != default_file_mode() || spec.cleanup != FileCleanup::OnExit {
             return Err(Error::InvalidImportSpec(format!(
-                "file import '{}' target_path must not be empty",
+                "file import '{}' uses file options without to-file",
                 key
             )));
         }
-        parse_file_mode(&spec.mode)?;
     }
     Ok(())
 }
@@ -541,7 +555,7 @@ pings:
 files:
   SERVICE_CA_CRT:
     src: ../pki/root.crt.pem
-    target_path: /home/debian/mata35/pki/root.crt.pem
+    to-file: /home/debian/mata35/pki/root.crt.pem
     mode: "0644"
     cleanup: keep
 "#,
@@ -552,8 +566,8 @@ files:
         let spec = document.files.get("SERVICE_CA_CRT").unwrap();
         assert_eq!(spec.src, dir.path().join("../pki/root.crt.pem"));
         assert_eq!(
-            spec.target_path,
-            PathBuf::from("/home/debian/mata35/pki/root.crt.pem")
+            spec.to_file.as_ref().unwrap(),
+            &PathBuf::from("/home/debian/mata35/pki/root.crt.pem")
         );
         assert_eq!(spec.mode, "0644");
         assert_eq!(spec.cleanup, FileCleanup::Keep);
@@ -580,13 +594,77 @@ files:
 files:
   SERVICE_CRT:
     src: ./issued/service.crt.pem
+    to-file: /tls/service.crt.pem
+"#,
+        )
+        .unwrap();
+
+        let spec = document.files.get("SERVICE_CRT").unwrap();
+        assert_eq!(
+            spec.to_file.as_ref().unwrap(),
+            &PathBuf::from("/tls/service.crt.pem")
+        );
+        assert_eq!(spec.mode, "0600");
+        assert_eq!(spec.cleanup, FileCleanup::OnExit);
+    }
+
+    #[test]
+    fn file_import_document_allows_plain_env_import_from_src_only() {
+        let document: FileImportDocument = serde_yaml::from_str(
+            r#"
+files:
+  FIREBASE_JSON:
+    src: ./firebase.json
+"#,
+        )
+        .unwrap();
+
+        let spec = document.files.get("FIREBASE_JSON").unwrap();
+        assert_eq!(spec.src, PathBuf::from("./firebase.json"));
+        assert_eq!(spec.to_file, None);
+        assert_eq!(spec.mode, "0600");
+        assert_eq!(spec.cleanup, FileCleanup::OnExit);
+    }
+
+    #[test]
+    fn rejects_file_options_without_to_file() {
+        let dir = tempdir().unwrap();
+        let spec_path = dir.path().join("files.yaml");
+        std::fs::write(
+            &spec_path,
+            r#"
+files:
+  SERVICE_CA_CRT:
+    src: ../pki/root.crt.pem
+    mode: "0644"
+"#,
+        )
+        .unwrap();
+
+        let err = load_file_import_document(&spec_path).unwrap_err();
+        assert!(matches!(err, Error::InvalidImportSpec(_)));
+        assert!(
+            err.to_string()
+                .contains("uses file options without to-file")
+        );
+    }
+
+    #[test]
+    fn file_import_document_accepts_legacy_target_path_alias() {
+        let document: FileImportDocument = serde_yaml::from_str(
+            r#"
+files:
+  SERVICE_CRT:
+    src: ./issued/service.crt.pem
     target_path: /tls/service.crt.pem
 "#,
         )
         .unwrap();
 
         let spec = document.files.get("SERVICE_CRT").unwrap();
-        assert_eq!(spec.mode, "0600");
-        assert_eq!(spec.cleanup, FileCleanup::OnExit);
+        assert_eq!(
+            spec.to_file.as_ref().unwrap(),
+            &PathBuf::from("/tls/service.crt.pem")
+        );
     }
 }

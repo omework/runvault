@@ -199,22 +199,29 @@ async fn run() -> Result<(), Error> {
                     path: spec.src.clone(),
                     source,
                 })?;
-                let mode = parse_file_mode(&spec.mode)?;
-                vault.set_file_content(
-                    &key,
-                    spec.target_path.clone(),
-                    content,
-                    mode,
-                    spec.cleanup,
-                )?;
-                profile.upsert_file_spec(
-                    &key,
-                    FileSpec {
-                        target_path: spec.target_path,
-                        mode: spec.mode,
-                        cleanup: spec.cleanup,
-                    },
-                );
+                if let Some(target_path) = spec.to_file {
+                    let mode = parse_file_mode(&spec.mode)?;
+                    vault.set_file_content(
+                        &key,
+                        target_path.clone(),
+                        content,
+                        mode,
+                        spec.cleanup,
+                    )?;
+                    profile.upsert_file_spec(
+                        &key,
+                        FileSpec {
+                            target_path,
+                            mode: spec.mode,
+                            cleanup: spec.cleanup,
+                        },
+                    );
+                } else {
+                    let value = String::from_utf8(content)
+                        .map_err(|_| Error::FileSourceNotUtf8 { path: spec.src })?;
+                    vault.set_plain_text(&key, value)?;
+                    profile.remove_file_spec(&key);
+                }
             }
 
             save_profile_to_path(&profile_path, &profile)?;

@@ -249,23 +249,27 @@ Spec format:
 files:
   SERVICE_CA_CRT:
     src: ../pki/ca/root/root.crt.pem
-    target_path: /home/debian/mata35/pki/root.crt.pem
+    to-file: /home/debian/mata35/pki/root.crt.pem
     mode: "0644"
     cleanup: keep
   SERVICE_KEY:
     src: ../pki/issued/glt.market/glt.market.key.pem
-    target_path: /home/debian/mata35/pki/glt.market.key.pem
+    to-file: /home/debian/mata35/pki/glt.market.key.pem
     mode: "0600"
     cleanup: keep
+  FIREBASE_JSON:
+    src: ../firebase/service-account.json
 ```
 
 Behavior:
 
 - `src` is read from disk when you run the command
-- encrypted file content is stored in `env.sec`
-- visible file metadata is mirrored into `runvault.yaml`
+- with `to-file`, encrypted file content is stored in `env.sec` and the visible file spec is mirrored into `runvault.yaml`
+- without `to-file`, the source file content is imported as a plain env value
+- when importing as a plain env value, the source file must be valid UTF-8
 - relative `src` paths are resolved relative to the YAML spec file location
 - imported file-backed keys overwrite existing values with the same key
+- `mode` and `cleanup` are only valid when `to-file` is present
 
 ## Revealing a stored value
 
