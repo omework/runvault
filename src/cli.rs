@@ -12,6 +12,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    Cmd(CmdCommand),
     CreateProfile(CreateProfileArgs),
     Bundle(BundleArgs),
     Cache(CacheCommand),
@@ -22,9 +23,19 @@ pub enum Command {
     ImportFiles(ImportFilesArgs),
     Delete(DeleteArgs),
     Reveal(RevealArgs),
-    Run(RunCommand),
-    RunBundle(RunBundleArgs),
+    Run(ProfileArgs),
     Ping(PingCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct CmdCommand {
+    #[command(subcommand)]
+    pub command: CmdSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CmdSubcommand {
+    Set(CmdSetArgs),
 }
 
 #[derive(Debug, Args)]
@@ -151,26 +162,9 @@ pub struct ProfileArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct RunCommand {
-    #[command(subcommand)]
-    pub command: Option<RunSubcommand>,
-    pub profile: Option<PathBuf>,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum RunSubcommand {
-    Set(RunSetArgs),
-}
-
-#[derive(Debug, Args)]
-pub struct RunSetArgs {
+pub struct CmdSetArgs {
     #[arg(trailing_var_arg = true, required = true)]
     pub parts: Vec<String>,
-}
-
-#[derive(Debug, Args)]
-pub struct RunBundleArgs {
-    pub bundle: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -289,15 +283,7 @@ impl ProfileArgs {
     }
 }
 
-impl RunCommand {
-    pub fn profile_or_default(&self) -> PathBuf {
-        self.profile
-            .clone()
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR))
-    }
-}
-
-impl RunSetArgs {
+impl CmdSetArgs {
     pub fn resolve(&self) -> (PathBuf, Vec<String>) {
         match self.parts.as_slice() {
             [cmd @ ..] if !cmd.is_empty() => {
@@ -349,7 +335,7 @@ fn looks_like_profile_path(path: &PathBuf) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, DEFAULT_PROFILE_DIR, PingSubcommand, RunSubcommand};
+    use super::{Cli, CmdSubcommand, Command, DEFAULT_PROFILE_DIR, PingSubcommand};
     use clap::Parser;
     use std::{
         fs,
@@ -413,27 +399,24 @@ mod tests {
     }
 
     #[test]
-    fn run_set_defaults_to_dot_vault_and_collects_command_after_separator() {
+    fn cmd_set_defaults_to_dot_vault_and_collects_command_after_separator() {
         let cli = Cli::try_parse_from([
-            "runvault", "run", "set", "--", "docker", "compose", "up", "-d",
+            "runvault", "cmd", "set", "--", "docker", "compose", "up", "-d",
         ])
         .unwrap();
 
-        let Command::Run(args) = cli.command else {
-            panic!("expected run command");
+        let Command::Cmd(args) = cli.command else {
+            panic!("expected cmd command");
         };
-        let Some(RunSubcommand::Set(set)) = args.command else {
-            panic!("expected run set subcommand");
-        };
-
+        let CmdSubcommand::Set(set) = args.command;
         let (profile, cmd) = set.resolve();
         assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
         assert_eq!(cmd, vec!["docker", "compose", "up", "-d"]);
     }
 
     #[test]
-    fn run_set_uses_explicit_profile_before_separator_when_profile_exists() {
-        let profile_dir = unique_temp_dir("runvault-cli-run-set-profile");
+    fn cmd_set_uses_explicit_profile_before_separator_when_profile_exists() {
+        let profile_dir = unique_temp_dir("runvault-cli-cmd-set-profile");
         fs::create_dir_all(&profile_dir).unwrap();
         fs::write(
             profile_dir.join("runvault.yaml"),
@@ -443,7 +426,7 @@ mod tests {
 
         let cli = Cli::try_parse_from([
             "runvault",
-            "run",
+            "cmd",
             "set",
             profile_dir.to_str().unwrap(),
             "--",
@@ -454,12 +437,10 @@ mod tests {
         ])
         .unwrap();
 
-        let Command::Run(args) = cli.command else {
-            panic!("expected run command");
+        let Command::Cmd(args) = cli.command else {
+            panic!("expected cmd command");
         };
-        let Some(RunSubcommand::Set(set)) = args.command else {
-            panic!("expected run set subcommand");
-        };
+        let CmdSubcommand::Set(set) = args.command;
 
         let (profile, cmd) = set.resolve();
         assert_eq!(profile, profile_dir);

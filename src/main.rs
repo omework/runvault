@@ -1,7 +1,7 @@
 use clap::Parser;
 use runvault::{
     bundle::{BundleExportOptions, export_bundle, load_bundle, materialize_bundle},
-    cli::{CacheSubcommand, Cli, Command},
+    cli::{CacheSubcommand, Cli, CmdSubcommand, Command},
     crypto::encrypt_env,
     envfile::{apply_prefix, parse_env_bytes, parse_reference_value},
     error::Error,
@@ -35,6 +35,16 @@ async fn main() {
 async fn run() -> Result<(), Error> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Cmd(args) => match args.command {
+            CmdSubcommand::Set(set) => {
+                let (profile_input, cmd) = set.resolve();
+                ensure_default_profile_exists(&profile_input)?;
+                let profile_path = resolve_profile_path(&profile_input);
+                let mut profile = Profile::from_path(&profile_path)?;
+                profile.run.cmd = cmd;
+                save_profile_to_path(&profile_path, &profile)
+            }
+        },
         Command::CreateProfile(args) => {
             let created = create_profile(
                 &args.profile_or_default(),
@@ -340,21 +350,15 @@ async fn run() -> Result<(), Error> {
                 args.output.as_ref(),
             )
         }
-        Command::Run(args) => match args.command {
-            Some(runvault::cli::RunSubcommand::Set(set)) => {
-                let (profile_input, cmd) = set.resolve();
-                ensure_default_profile_exists(&profile_input)?;
-                let profile_path = resolve_profile_path(&profile_input);
-                let mut profile = Profile::from_path(&profile_path)?;
-                profile.run.cmd = cmd;
-                save_profile_to_path(&profile_path, &profile)
+        Command::Run(args) => {
+            let target = args.profile_or_default();
+            if looks_like_profile_input(&target) {
+                run_profile(&target).await
+            } else {
+                let bundle = load_bundle(&target)?;
+                let (_temp_dir, profile_path) = materialize_bundle(&bundle)?;
+                run_profile_with_secure_store_key(&profile_path, &target).await
             }
-            None => run_profile(&args.profile_or_default()).await,
-        },
-        Command::RunBundle(args) => {
-            let bundle = load_bundle(&args.bundle)?;
-            let (_temp_dir, profile_path) = materialize_bundle(&bundle)?;
-            run_profile_with_secure_store_key(&profile_path, &args.bundle).await
         }
         Command::Ping(args) => match args.command {
             Some(runvault::cli::PingSubcommand::Add(add)) => {
@@ -373,6 +377,12 @@ async fn run() -> Result<(), Error> {
             None => ping_profile(&args.profile_or_default()).await,
         },
     }
+}
+
+fn looks_like_profile_input(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name == "runvault.yaml")
+        || path.is_dir()
+        || path.join("runvault.yaml").exists()
 }
 
 fn apply_file_import_spec(

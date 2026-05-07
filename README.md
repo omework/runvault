@@ -26,7 +26,7 @@ If you omit the profile path, `runvault` now defaults to:
 runvault create-profile
 runvault create-profile deployments/ovh/services
 runvault bundle services.bundle.yaml --version v1.0.0 --description "OVH services profile"
-runvault run-bundle services.bundle.yaml
+runvault run services.bundle.yaml
 runvault encrypt .env
 runvault jwt JWT_SIGNING_SECRET --issuer runvault --audience tempo --subject worker --ttl 15m
 runvault set DATABASE_URL --value postgres://...
@@ -35,7 +35,7 @@ runvault import .env.example .env.local --prefix PROD_
 runvault import deployments/ovh/services .env.example .env.local --prefix PROD_
 runvault import-files files-spec.yaml tls-files.yaml
 runvault import-files deployments/ovh/services files-spec.yaml tls-files.yaml
-runvault run set -- docker compose up -d
+runvault cmd set -- docker compose up -d
 runvault ping add api http://127.0.0.1:8080/health
 runvault set deployments/ovh/services TLS_KEY \
   --value \"secret-key\" \
@@ -139,9 +139,9 @@ Edit that before you rely on `runvault run`.
 You can also set the run command from the CLI:
 
 ```bash
-runvault run set -- docker compose up -d
-runvault run set vault -- docker compose up -d
-runvault run set . -- /usr/local/bin/my-service --port 8080
+runvault cmd set -- docker compose up -d
+runvault cmd set vault -- docker compose up -d
+runvault cmd set . -- /usr/local/bin/my-service --port 8080
 ```
 
 Why `--`:
@@ -180,14 +180,14 @@ runvault bundle deployments/ovh/services/vault services.bundle.yaml \
 Run it later with:
 
 ```bash
-runvault run-bundle services.bundle.yaml
+runvault run services.bundle.yaml
 ```
 
 Behavior:
 
 - `bundle` defaults to `./.vault` if no profile is specified
-- `run-bundle` unpacks into a temporary profile directory and runs from there
-- password reuse for `run-bundle` is keyed off the bundle file path, not the temporary extraction path
+- `run <bundle-file>` unpacks into a temporary profile directory and runs from there
+- password reuse for bundle execution is keyed off the bundle file path, not the temporary extraction path
 - the bundle contains only the runvault profile and encrypted env payload, not unrelated app files such as `docker-compose.yml`
 
 ## Managing ping targets
