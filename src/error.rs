@@ -66,6 +66,16 @@ pub enum Error {
     FileSourceNotUtf8 { path: PathBuf },
     #[error("invalid file mode '{value}', expected octal like 0600")]
     InvalidFileMode { value: String },
+    #[error("invalid duration '{value}', expected a number with optional suffix s, m, h, or d")]
+    InvalidDuration { value: String },
+    #[error("invalid JWT claim '{value}', expected KEY=VALUE")]
+    InvalidJwtClaim { value: String },
+    #[error("custom JWT claim '{key}' conflicts with a reserved claim")]
+    ReservedJwtClaim { key: String },
+    #[error("config key '{key}' must be a plain-text value for JWT generation")]
+    JwtSecretMustBePlainText { key: String },
+    #[error("JWT generation failed: {0}")]
+    Jwt(String),
     #[error("secure store error: {0}")]
     SecureStore(String),
     #[error("http ping failed: {0}")]

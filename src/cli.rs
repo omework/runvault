@@ -15,6 +15,7 @@ pub enum Command {
     CreateProfile(CreateProfileArgs),
     Cache(CacheCommand),
     Encrypt(EncryptArgs),
+    Jwt(JwtArgs),
     Set(SetArgs),
     Import(ImportArgs),
     ImportFiles(ImportFilesArgs),
@@ -52,6 +53,24 @@ pub struct CreateProfileArgs {
 #[derive(Debug, Args)]
 pub struct EncryptArgs {
     pub input: PathBuf,
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct JwtArgs {
+    #[arg(value_name = "PROFILE_OR_SECRET_KEY", num_args = 1..=2)]
+    pub targets: Vec<String>,
+    #[arg(long)]
+    pub issuer: Option<String>,
+    #[arg(long)]
+    pub audience: Option<String>,
+    #[arg(long)]
+    pub subject: Option<String>,
+    #[arg(long, default_value = "1h")]
+    pub ttl: String,
+    #[arg(long = "claim", value_name = "KEY=VALUE")]
+    pub claims: Vec<String>,
+    #[arg(long, value_name = "PATH")]
     pub output: Option<PathBuf>,
 }
 
@@ -141,6 +160,16 @@ impl SetArgs {
     }
 }
 
+impl JwtArgs {
+    pub fn resolve(&self) -> (PathBuf, String) {
+        match self.targets.as_slice() {
+            [key] => (PathBuf::from(DEFAULT_PROFILE_DIR), key.clone()),
+            [profile, key] => (PathBuf::from(profile), key.clone()),
+            _ => unreachable!("clap enforces jwt target arity"),
+        }
+    }
+}
+
 impl ImportArgs {
     pub fn resolve(&self) -> (PathBuf, Vec<PathBuf>) {
         match self.targets.as_slice() {
@@ -221,6 +250,19 @@ mod tests {
             inputs,
             vec![PathBuf::from(".env"), PathBuf::from(".env.local")]
         );
+    }
+
+    #[test]
+    fn jwt_defaults_to_dot_vault_for_secret_key() {
+        let cli = Cli::try_parse_from(["runvault", "jwt", "JWT_SIGNING_SECRET"]).unwrap();
+
+        let Command::Jwt(args) = cli.command else {
+            panic!("expected jwt command");
+        };
+
+        let (profile, key) = args.resolve();
+        assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
+        assert_eq!(key, "JWT_SIGNING_SECRET");
     }
 
     #[test]

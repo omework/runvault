@@ -26,6 +26,7 @@ If you omit the profile path, `runvault` now defaults to:
 runvault create-profile
 runvault create-profile deployments/ovh/services
 runvault encrypt .env
+runvault jwt JWT_SIGNING_SECRET --issuer runvault --audience tempo --subject worker --ttl 15m
 runvault set DATABASE_URL --value postgres://...
 runvault set deployments/ovh/services DATABASE_URL --value postgres://...
 runvault import .env.example .env.local --prefix PROD_
@@ -229,6 +230,41 @@ Defaults:
 - `--keep` changes cleanup to `keep`
 
 `set ... --to-file ...` also updates `runvault.yaml` so the file spec is visible without decrypting the vault.
+
+## Generating a JWT
+
+You can mint an HS256 JWT from a plain-text secret already stored in the vault:
+
+```bash
+runvault jwt JWT_SIGNING_SECRET \
+  --issuer runvault \
+  --audience tempo \
+  --subject workers-otel \
+  --ttl 15m
+```
+
+Explicit profile also works:
+
+```bash
+runvault jwt deployments/ovh/services/vault JWT_SIGNING_SECRET --audience tempo
+```
+
+Behavior:
+
+- the secret must be a plain-text vault value
+- `iat` and `exp` are always added automatically
+- `--ttl` accepts:
+  - seconds, for example `900`
+  - `s`, `m`, `h`, `d` suffixes, for example `30s`, `15m`, `1h`, `1d`
+- you can add custom string claims with repeated `--claim KEY=VALUE`
+- custom claims cannot override reserved claims:
+  - `iat`
+  - `exp`
+  - `iss`
+  - `aud`
+  - `sub`
+- by default the token is written to stdout
+- `--output <path>` writes the generated token to a file instead
 
 ## Importing an existing env file
 

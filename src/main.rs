@@ -4,6 +4,7 @@ use runvault::{
     crypto::encrypt_env,
     envfile::{apply_prefix, parse_env_bytes, parse_reference_value},
     error::Error,
+    jwt::{JwtOptions, generate_hs256, parse_ttl_seconds},
     password::{prompt_password_confirm, prompt_password_once},
     profile::{
         CreateProfileOptions, FileCleanup, FileImportSpec, FileSpec, Profile, create_profile,
@@ -67,6 +68,39 @@ async fn run() -> Result<(), Error> {
                 path: output_path,
                 source,
             })?;
+            Ok(())
+        }
+        Command::Jwt(args) => {
+            let (profile_input, key) = args.resolve();
+            let profile_path = resolve_profile_path(&profile_input);
+            let profile = Profile::from_path(&profile_path)?;
+            let (vault, _) = load_vault_with_lazy_password(&profile, &profile_path)?;
+            let secret = match vault.entries().get(&key) {
+                Some(VaultValue::PlainText(value)) => value.as_str(),
+                Some(VaultValue::FileContent { .. }) => {
+                    return Err(Error::JwtSecretMustBePlainText { key });
+                }
+                None => return Err(Error::MissingConfigKey(key)),
+            };
+            let token = generate_hs256(
+                secret,
+                &JwtOptions {
+                    issuer: args.issuer,
+                    audience: args.audience,
+                    subject: args.subject,
+                    ttl_seconds: parse_ttl_seconds(&args.ttl)?,
+                    claims: args.claims,
+                },
+            )?;
+
+            if let Some(output_path) = args.output {
+                std::fs::write(&output_path, token).map_err(|source| Error::WriteFile {
+                    path: output_path,
+                    source,
+                })?;
+            } else {
+                println!("{}", token);
+            }
             Ok(())
         }
         Command::Set(args) => {
