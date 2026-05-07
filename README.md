@@ -232,8 +232,26 @@ Behavior:
 
 - dotenv content is parsed with the same parser used for legacy env payloads
 - imported keys overwrite existing plain-text values with the same final key
-- file-backed values are not created by `import`; it is plain env text import only
+- `import` also understands inline file-spec references in env values
 - the prefix is applied before key validation
+
+Inline reference format:
+
+```dotenv
+PROD_GLT_MARKET_OPENAI_API_KEY=@.env-files.yaml
+PROD_GLT_MARKET_GOOGLE_APPLICATION_CREDENTIALS=@".env-files.yaml"
+```
+
+Recommended notation:
+
+- `@.env-files.yaml`
+- use `@"path with spaces.yaml"` only when quoting is needed
+
+When `import` sees one of these values, it:
+
+- loads the referenced YAML file
+- looks up the same env key inside its `files:` map
+- imports that entry using the same semantics as `runvault import-files`
 
 ## Importing file-backed values from a YAML spec
 
@@ -267,9 +285,11 @@ Behavior:
 - with `to-file`, encrypted file content is stored in `env.sec` and the visible file spec is mirrored into `runvault.yaml`
 - without `to-file`, the source file content is imported as a plain env value
 - when importing as a plain env value, the source file must be valid UTF-8
+- `runvault import` can reference this same spec file inline from a dotenv value using `@path`
 - relative `src` paths are resolved relative to the YAML spec file location
 - imported file-backed keys overwrite existing values with the same key
 - `mode` and `cleanup` are only valid when `to-file` is present
+- `~` in `src` paths is expanded against `$HOME`
 
 ## Revealing a stored value
 

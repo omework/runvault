@@ -2,12 +2,13 @@ use clap::Parser;
 use runvault::{
     cli::{CacheSubcommand, Cli, Command},
     crypto::encrypt_env,
-    envfile::{apply_prefix, parse_env_bytes},
+    envfile::{apply_prefix, parse_env_bytes, parse_reference_value},
     error::Error,
     password::{prompt_password_confirm, prompt_password_once},
     profile::{
-        CreateProfileOptions, FileCleanup, FileSpec, Profile, create_profile,
-        load_file_import_document, parse_file_mode, resolve_profile_path, save_profile_to_path,
+        CreateProfileOptions, FileCleanup, FileImportSpec, FileSpec, Profile, create_profile,
+        expand_user_home, load_file_import_document, parse_file_mode, resolve_profile_path,
+        save_profile_to_path,
     },
     run::{ping_profile, run_profile},
     secure_store::{
@@ -15,7 +16,11 @@ use runvault::{
     },
     vault::{VaultDocument, VaultValue, load_vault_with_password, save_vault_with_password},
 };
-use std::{io::Write, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 #[tokio::main]
 async fn main() {
@@ -169,11 +174,43 @@ async fn run() -> Result<(), Error> {
                 path: args.input.clone(),
                 source,
             })?;
+            let input_dir = args
+                .input
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf();
             let vars = parse_env_bytes(&input)?;
             let vars = apply_prefix(vars, args.prefix.as_deref().unwrap_or(""))?;
+            let mut referenced_specs: BTreeMap<(PathBuf, String), FileImportSpec> =
+                BTreeMap::new();
             for (key, value) in vars {
-                vault.set_plain_text(&key, value)?;
-                profile.remove_file_spec(&key);
+                if let Some(reference) = parse_reference_value(&value) {
+                    let mut reference_path = expand_user_home(Path::new(&reference));
+                    if reference_path.is_relative() {
+                        reference_path = input_dir.join(reference_path);
+                    }
+                    let spec = if let Some(spec) =
+                        referenced_specs.get(&(reference_path.clone(), key.clone()))
+                    {
+                        spec.clone()
+                    } else {
+                        let document = load_file_import_document(&reference_path)?;
+                        let spec = document.files.get(&key).cloned().ok_or_else(|| {
+                            Error::InvalidImportSpec(format!(
+                                "reference file '{}' does not define key '{}'",
+                                reference_path.display(),
+                                key
+                            ))
+                        })?;
+                        referenced_specs
+                            .insert((reference_path.clone(), key.clone()), spec.clone());
+                        spec
+                    };
+                    apply_file_import_spec(&mut profile, &mut vault, &key, spec)?;
+                } else {
+                    vault.set_plain_text(&key, value)?;
+                    profile.remove_file_spec(&key);
+                }
             }
 
             save_profile_to_path(&profile_path, &profile)?;
@@ -195,33 +232,7 @@ async fn run() -> Result<(), Error> {
 
             let document = load_file_import_document(&args.input)?;
             for (key, spec) in document.files {
-                let content = std::fs::read(&spec.src).map_err(|source| Error::ReadFile {
-                    path: spec.src.clone(),
-                    source,
-                })?;
-                if let Some(target_path) = spec.to_file {
-                    let mode = parse_file_mode(&spec.mode)?;
-                    vault.set_file_content(
-                        &key,
-                        target_path.clone(),
-                        content,
-                        mode,
-                        spec.cleanup,
-                    )?;
-                    profile.upsert_file_spec(
-                        &key,
-                        FileSpec {
-                            target_path,
-                            mode: spec.mode,
-                            cleanup: spec.cleanup,
-                        },
-                    );
-                } else {
-                    let value = String::from_utf8(content)
-                        .map_err(|_| Error::FileSourceNotUtf8 { path: spec.src })?;
-                    vault.set_plain_text(&key, value)?;
-                    profile.remove_file_spec(&key);
-                }
+                apply_file_import_spec(&mut profile, &mut vault, &key, spec)?;
             }
 
             save_profile_to_path(&profile_path, &profile)?;
@@ -255,6 +266,36 @@ async fn run() -> Result<(), Error> {
         Command::Run(args) => run_profile(&args.profile).await,
         Command::Ping(args) => ping_profile(&args.profile).await,
     }
+}
+
+fn apply_file_import_spec(
+    profile: &mut Profile,
+    vault: &mut VaultDocument,
+    key: &str,
+    spec: FileImportSpec,
+) -> Result<(), Error> {
+    let content = std::fs::read(&spec.src).map_err(|source| Error::ReadFile {
+        path: spec.src.clone(),
+        source,
+    })?;
+    if let Some(target_path) = spec.to_file {
+        let mode = parse_file_mode(&spec.mode)?;
+        vault.set_file_content(key, target_path.clone(), content, mode, spec.cleanup)?;
+        profile.upsert_file_spec(
+            key,
+            FileSpec {
+                target_path,
+                mode: spec.mode,
+                cleanup: spec.cleanup,
+            },
+        );
+    } else {
+        let value =
+            String::from_utf8(content).map_err(|_| Error::FileSourceNotUtf8 { path: spec.src })?;
+        vault.set_plain_text(key, value)?;
+        profile.remove_file_spec(key);
+    }
+    Ok(())
 }
 
 fn load_vault_with_lazy_password(

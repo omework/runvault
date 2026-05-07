@@ -298,11 +298,30 @@ pub fn load_file_import_document(path: &Path) -> Result<FileImportDocument, Erro
     validate_file_import_document(&document)?;
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
     for spec in document.files.values_mut() {
+        spec.src = expand_user_home(&spec.src);
         if spec.src.is_relative() {
             spec.src = base_dir.join(&spec.src);
         }
     }
     Ok(document)
+}
+
+pub fn expand_user_home(path: &Path) -> PathBuf {
+    let Some(raw) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    if raw == "~" {
+        return std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| path.to_path_buf());
+    }
+    if let Some(suffix) = raw.strip_prefix("~/") {
+        return std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join(suffix))
+            .unwrap_or_else(|| path.to_path_buf());
+    }
+    path.to_path_buf()
 }
 
 fn validate_file_import_document(document: &FileImportDocument) -> Result<(), Error> {
@@ -346,11 +365,11 @@ fn validate_file_import_document(document: &FileImportDocument) -> Result<(), Er
 mod tests {
     use super::{
         CreateProfileOptions, DEFAULT_ENV_FILE, DEFAULT_PROFILE_FILE, FileCleanup,
-        FileImportDocument, FileSpec, Profile, create_profile, load_file_import_document,
-        resolve_profile_path, save_profile_to_path,
+        FileImportDocument, FileSpec, Profile, create_profile, expand_user_home,
+        load_file_import_document, resolve_profile_path, save_profile_to_path,
     };
     use crate::error::Error;
-    use std::{collections::BTreeMap, path::PathBuf};
+    use std::{collections::BTreeMap, path::{Path, PathBuf}};
     use tempfile::tempdir;
 
     #[test]
@@ -665,6 +684,19 @@ files:
         assert_eq!(
             spec.to_file.as_ref().unwrap(),
             &PathBuf::from("/tls/service.crt.pem")
+        );
+    }
+
+    #[test]
+    fn expands_tilde_to_home_directory() {
+        let home = std::env::var_os("HOME").unwrap();
+        assert_eq!(
+            expand_user_home(Path::new("~/secret.txt")),
+            PathBuf::from(home).join("secret.txt")
+        );
+        assert_eq!(
+            expand_user_home(Path::new("/tmp/secret.txt")),
+            PathBuf::from("/tmp/secret.txt")
         );
     }
 }

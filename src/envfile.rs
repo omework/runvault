@@ -136,9 +136,25 @@ pub fn apply_prefix(
     Ok(out)
 }
 
+pub fn parse_reference_value(value: &str) -> Option<String> {
+    let raw = value.strip_prefix('@')?;
+    if raw.is_empty() {
+        return None;
+    }
+    if raw.len() >= 2 {
+        if raw.starts_with('"') && raw.ends_with('"') {
+            return Some(raw[1..raw.len() - 1].to_string());
+        }
+        if raw.starts_with('\'') && raw.ends_with('\'') {
+            return Some(raw[1..raw.len() - 1].to_string());
+        }
+    }
+    Some(raw.to_string())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{apply_prefix, parse_env_bytes, validate_env_key};
+    use super::{apply_prefix, parse_env_bytes, parse_reference_value, validate_env_key};
     use std::collections::BTreeMap;
 
     #[test]
@@ -184,5 +200,23 @@ mod tests {
         let vars = BTreeMap::from([("API_KEY".to_string(), "a".to_string())]);
         let err = apply_prefix(vars, "1BAD_").unwrap_err();
         assert!(err.to_string().contains("invalid config key"));
+    }
+
+    #[test]
+    fn parses_reference_values() {
+        assert_eq!(
+            parse_reference_value("@.env-files.yaml").as_deref(),
+            Some(".env-files.yaml")
+        );
+        assert_eq!(
+            parse_reference_value("@\".env-files.yaml\"").as_deref(),
+            Some(".env-files.yaml")
+        );
+        assert_eq!(
+            parse_reference_value("@'files spec.yaml'").as_deref(),
+            Some("files spec.yaml")
+        );
+        assert_eq!(parse_reference_value("plain-value"), None);
+        assert_eq!(parse_reference_value("@"), None);
     }
 }
