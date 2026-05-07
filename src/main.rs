@@ -6,8 +6,8 @@ use runvault::{
     error::Error,
     password::{prompt_password_confirm, prompt_password_once},
     profile::{
-        CreateProfileOptions, FileCleanup, FileSpec, Profile, create_profile, parse_file_mode,
-        resolve_profile_path, save_profile_to_path,
+        CreateProfileOptions, FileCleanup, FileSpec, Profile, create_profile,
+        load_file_import_document, parse_file_mode, resolve_profile_path, save_profile_to_path,
     },
     run::{ping_profile, run_profile},
     secure_store::{
@@ -174,6 +174,47 @@ async fn run() -> Result<(), Error> {
             for (key, value) in vars {
                 vault.set_plain_text(&key, value)?;
                 profile.remove_file_spec(&key);
+            }
+
+            save_profile_to_path(&profile_path, &profile)?;
+            save_vault_with_password(&profile, &profile_path, &vault, password)
+        }
+        Command::ImportFiles(args) => {
+            let profile_path = resolve_profile_path(&args.profile);
+            let mut profile = Profile::from_path(&profile_path)?;
+            let env_path = profile.resolve_env_path(&profile_path);
+            let (mut vault, password) = if env_path.exists() {
+                let (vault, password) = load_vault_with_lazy_password(&profile, &profile_path)?;
+                (vault, password)
+            } else {
+                (
+                    VaultDocument::default(),
+                    password_for_new_vault(&profile_path)?,
+                )
+            };
+
+            let document = load_file_import_document(&args.input)?;
+            for (key, spec) in document.files {
+                let content = std::fs::read(&spec.src).map_err(|source| Error::ReadFile {
+                    path: spec.src.clone(),
+                    source,
+                })?;
+                let mode = parse_file_mode(&spec.mode)?;
+                vault.set_file_content(
+                    &key,
+                    spec.target_path.clone(),
+                    content,
+                    mode,
+                    spec.cleanup,
+                )?;
+                profile.upsert_file_spec(
+                    &key,
+                    FileSpec {
+                        target_path: spec.target_path,
+                        mode: spec.mode,
+                        cleanup: spec.cleanup,
+                    },
+                );
             }
 
             save_profile_to_path(&profile_path, &profile)?;

@@ -26,6 +26,22 @@ pub struct FileSpec {
     pub cleanup: FileCleanup,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileImportSpec {
+    pub src: PathBuf,
+    pub target_path: PathBuf,
+    #[serde(default = "default_file_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub cleanup: FileCleanup,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FileImportDocument {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub files: BTreeMap<String, FileImportSpec>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
     pub name: String,
@@ -262,11 +278,62 @@ pub fn parse_file_mode(value: &str) -> Result<u32, Error> {
     })
 }
 
+pub fn load_file_import_document(path: &Path) -> Result<FileImportDocument, Error> {
+    let content = std::fs::read_to_string(path).map_err(|source| Error::ReadFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut document: FileImportDocument =
+        serde_yaml::from_str(&content).map_err(|source| Error::ImportSpecParse {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    validate_file_import_document(&document)?;
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    for spec in document.files.values_mut() {
+        if spec.src.is_relative() {
+            spec.src = base_dir.join(&spec.src);
+        }
+    }
+    Ok(document)
+}
+
+fn validate_file_import_document(document: &FileImportDocument) -> Result<(), Error> {
+    if document.files.is_empty() {
+        return Err(Error::InvalidImportSpec(
+            "files must contain at least one entry".to_string(),
+        ));
+    }
+    for (key, spec) in &document.files {
+        if !validate_env_key(key) {
+            return Err(Error::InvalidImportSpec(format!(
+                "file import key '{}' is not a valid env key",
+                key
+            )));
+        }
+        if spec.src.as_os_str().is_empty() {
+            return Err(Error::InvalidImportSpec(format!(
+                "file import '{}' src must not be empty",
+                key
+            )));
+        }
+        if spec.target_path.as_os_str().is_empty() {
+            return Err(Error::InvalidImportSpec(format!(
+                "file import '{}' target_path must not be empty",
+                key
+            )));
+        }
+        parse_file_mode(&spec.mode)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateProfileOptions, DEFAULT_ENV_FILE, DEFAULT_PROFILE_FILE, FileCleanup, FileSpec,
-        Profile, create_profile, resolve_profile_path, save_profile_to_path,
+        CreateProfileOptions, DEFAULT_ENV_FILE, DEFAULT_PROFILE_FILE, FileCleanup,
+        FileImportDocument, FileSpec, Profile, create_profile, load_file_import_document,
+        resolve_profile_path, save_profile_to_path,
     };
     use crate::error::Error;
     use std::{collections::BTreeMap, path::PathBuf};
@@ -462,5 +529,64 @@ pings:
         assert_eq!(spec.target_path, PathBuf::from("/tmp/root.crt.pem"));
         assert_eq!(spec.mode, "0644");
         assert_eq!(spec.cleanup, FileCleanup::Keep);
+    }
+
+    #[test]
+    fn loads_file_import_document_and_resolves_relative_src_paths() {
+        let dir = tempdir().unwrap();
+        let spec_path = dir.path().join("files.yaml");
+        std::fs::write(
+            &spec_path,
+            r#"
+files:
+  SERVICE_CA_CRT:
+    src: ../pki/root.crt.pem
+    target_path: /home/debian/mata35/pki/root.crt.pem
+    mode: "0644"
+    cleanup: keep
+"#,
+        )
+        .unwrap();
+
+        let document = load_file_import_document(&spec_path).unwrap();
+        let spec = document.files.get("SERVICE_CA_CRT").unwrap();
+        assert_eq!(spec.src, dir.path().join("../pki/root.crt.pem"));
+        assert_eq!(
+            spec.target_path,
+            PathBuf::from("/home/debian/mata35/pki/root.crt.pem")
+        );
+        assert_eq!(spec.mode, "0644");
+        assert_eq!(spec.cleanup, FileCleanup::Keep);
+    }
+
+    #[test]
+    fn rejects_empty_file_import_document() {
+        let dir = tempdir().unwrap();
+        let spec_path = dir.path().join("files.yaml");
+        std::fs::write(&spec_path, "files: {}\n").unwrap();
+
+        let err = load_file_import_document(&spec_path).unwrap_err();
+        assert!(matches!(err, Error::InvalidImportSpec(_)));
+        assert!(
+            err.to_string()
+                .contains("files must contain at least one entry")
+        );
+    }
+
+    #[test]
+    fn file_import_document_defaults_mode_and_cleanup() {
+        let document: FileImportDocument = serde_yaml::from_str(
+            r#"
+files:
+  SERVICE_CRT:
+    src: ./issued/service.crt.pem
+    target_path: /tls/service.crt.pem
+"#,
+        )
+        .unwrap();
+
+        let spec = document.files.get("SERVICE_CRT").unwrap();
+        assert_eq!(spec.mode, "0600");
+        assert_eq!(spec.cleanup, FileCleanup::OnExit);
     }
 }

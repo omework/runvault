@@ -21,6 +21,7 @@ runvault create-profile deployments/ovh/services
 runvault encrypt .env
 runvault set deployments/ovh/services DATABASE_URL --value postgres://...
 runvault import deployments/ovh/services .env.example --prefix PROD_
+runvault import-files deployments/ovh/services files-spec.yaml
 runvault set deployments/ovh/services TLS_KEY \
   --value \"secret-key\" \
   --to-file .runvault/tls/key.pem \
@@ -233,6 +234,38 @@ Behavior:
 - imported keys overwrite existing plain-text values with the same final key
 - file-backed values are not created by `import`; it is plain env text import only
 - the prefix is applied before key validation
+
+## Importing file-backed values from a YAML spec
+
+You can bulk-load file-backed values from a YAML file:
+
+```bash
+runvault import-files deployments/ovh/services files-spec.yaml
+```
+
+Spec format:
+
+```yaml
+files:
+  SERVICE_CA_CRT:
+    src: ../pki/ca/root/root.crt.pem
+    target_path: /home/debian/mata35/pki/root.crt.pem
+    mode: "0644"
+    cleanup: keep
+  SERVICE_KEY:
+    src: ../pki/issued/glt.market/glt.market.key.pem
+    target_path: /home/debian/mata35/pki/glt.market.key.pem
+    mode: "0600"
+    cleanup: keep
+```
+
+Behavior:
+
+- `src` is read from disk when you run the command
+- encrypted file content is stored in `env.sec`
+- visible file metadata is mirrored into `runvault.yaml`
+- relative `src` paths are resolved relative to the YAML spec file location
+- imported file-backed keys overwrite existing values with the same key
 
 ## Revealing a stored value
 

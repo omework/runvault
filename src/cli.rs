@@ -15,6 +15,7 @@ pub enum Command {
     Encrypt(EncryptArgs),
     Set(SetArgs),
     Import(ImportArgs),
+    ImportFiles(ImportFilesArgs),
     Delete(DeleteArgs),
     Reveal(RevealArgs),
     Run(ProfileArgs),
@@ -83,6 +84,12 @@ pub struct ImportArgs {
     pub input: PathBuf,
     #[arg(long)]
     pub prefix: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ImportFilesArgs {
+    pub profile: PathBuf,
+    pub input: PathBuf,
 }
 
 #[derive(Debug, Args)]

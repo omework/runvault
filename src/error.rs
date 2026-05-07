@@ -22,6 +22,12 @@ pub enum Error {
         #[source]
         source: serde_yaml::Error,
     },
+    #[error("failed to parse file import spec {path}: {source}")]
+    ImportSpecParse {
+        path: PathBuf,
+        #[source]
+        source: serde_yaml::Error,
+    },
     #[error("failed to serialize profile: {0}")]
     ProfileSerialize(String),
     #[error("failed to read password: {0}")]
@@ -38,6 +44,8 @@ pub enum Error {
     EnvParse(String),
     #[error("profile is invalid: {0}")]
     InvalidProfile(String),
+    #[error("file import spec is invalid: {0}")]
+    InvalidImportSpec(String),
     #[error("invalid config key '{0}'")]
     InvalidConfigKey(String),
     #[error("config key '{0}' does not exist")]
