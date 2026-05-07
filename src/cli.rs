@@ -1,6 +1,8 @@
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
+use crate::profile::DEFAULT_PROFILE_DIR;
+
 #[derive(Debug, Parser)]
 #[command(name = "runvault", version, about = "Encrypted env launcher")]
 pub struct Cli {
@@ -40,7 +42,7 @@ pub struct CacheClearArgs {
 
 #[derive(Debug, Args)]
 pub struct CreateProfileArgs {
-    pub profile: PathBuf,
+    pub profile: Option<PathBuf>,
     #[arg(long)]
     pub name: Option<String>,
     #[arg(long = "env-file", default_value = "env.sec")]
@@ -55,8 +57,8 @@ pub struct EncryptArgs {
 
 #[derive(Debug, Args)]
 pub struct SetArgs {
-    pub profile: PathBuf,
-    pub key: String,
+    #[arg(value_name = "PROFILE_OR_KEY", num_args = 1..=2)]
+    pub targets: Vec<String>,
     #[arg(
         long,
         conflicts_with = "from_file",
@@ -80,28 +82,28 @@ pub struct SetArgs {
 
 #[derive(Debug, Args)]
 pub struct ImportArgs {
-    pub profile: PathBuf,
-    pub input: PathBuf,
+    #[arg(value_name = "PROFILE_OR_INPUT", num_args = 1..=2)]
+    pub targets: Vec<PathBuf>,
     #[arg(long)]
     pub prefix: Option<String>,
 }
 
 #[derive(Debug, Args)]
 pub struct ImportFilesArgs {
-    pub profile: PathBuf,
-    pub input: PathBuf,
+    #[arg(value_name = "PROFILE_OR_INPUT", num_args = 1..=2)]
+    pub targets: Vec<PathBuf>,
 }
 
 #[derive(Debug, Args)]
 pub struct DeleteArgs {
-    pub profile: PathBuf,
-    pub key: String,
+    #[arg(value_name = "PROFILE_OR_KEY", num_args = 1..=2)]
+    pub targets: Vec<String>,
 }
 
 #[derive(Debug, Args)]
 pub struct RevealArgs {
-    pub profile: PathBuf,
-    pub key: String,
+    #[arg(value_name = "PROFILE_OR_KEY", num_args = 1..=2)]
+    pub targets: Vec<String>,
     #[arg(long)]
     pub raw: bool,
     #[arg(long, value_name = "PATH")]
@@ -110,5 +112,79 @@ pub struct RevealArgs {
 
 #[derive(Debug, Args)]
 pub struct ProfileArgs {
-    pub profile: PathBuf,
+    pub profile: Option<PathBuf>,
+}
+
+impl CacheClearArgs {
+    pub fn profile_or_default(&self) -> PathBuf {
+        self.profile
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR))
+    }
+}
+
+impl CreateProfileArgs {
+    pub fn profile_or_default(&self) -> PathBuf {
+        self.profile
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR))
+    }
+}
+
+impl SetArgs {
+    pub fn resolve(&self) -> (PathBuf, String) {
+        match self.targets.as_slice() {
+            [key] => (PathBuf::from(DEFAULT_PROFILE_DIR), key.clone()),
+            [profile, key] => (PathBuf::from(profile), key.clone()),
+            _ => unreachable!("clap enforces set target arity"),
+        }
+    }
+}
+
+impl ImportArgs {
+    pub fn resolve(&self) -> (PathBuf, PathBuf) {
+        match self.targets.as_slice() {
+            [input] => (PathBuf::from(DEFAULT_PROFILE_DIR), input.clone()),
+            [profile, input] => (profile.clone(), input.clone()),
+            _ => unreachable!("clap enforces import target arity"),
+        }
+    }
+}
+
+impl ImportFilesArgs {
+    pub fn resolve(&self) -> (PathBuf, PathBuf) {
+        match self.targets.as_slice() {
+            [input] => (PathBuf::from(DEFAULT_PROFILE_DIR), input.clone()),
+            [profile, input] => (profile.clone(), input.clone()),
+            _ => unreachable!("clap enforces import-files target arity"),
+        }
+    }
+}
+
+impl DeleteArgs {
+    pub fn resolve(&self) -> (PathBuf, String) {
+        match self.targets.as_slice() {
+            [key] => (PathBuf::from(DEFAULT_PROFILE_DIR), key.clone()),
+            [profile, key] => (PathBuf::from(profile), key.clone()),
+            _ => unreachable!("clap enforces delete target arity"),
+        }
+    }
+}
+
+impl RevealArgs {
+    pub fn resolve(&self) -> (PathBuf, String) {
+        match self.targets.as_slice() {
+            [key] => (PathBuf::from(DEFAULT_PROFILE_DIR), key.clone()),
+            [profile, key] => (PathBuf::from(profile), key.clone()),
+            _ => unreachable!("clap enforces reveal target arity"),
+        }
+    }
+}
+
+impl ProfileArgs {
+    pub fn profile_or_default(&self) -> PathBuf {
+        self.profile
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR))
+    }
 }

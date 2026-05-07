@@ -35,7 +35,7 @@ async fn run() -> Result<(), Error> {
     match cli.command {
         Command::CreateProfile(args) => {
             let created = create_profile(
-                &args.profile,
+                &args.profile_or_default(),
                 &CreateProfileOptions {
                     name: args.name,
                     env_file: args.env_file,
@@ -70,7 +70,8 @@ async fn run() -> Result<(), Error> {
             Ok(())
         }
         Command::Set(args) => {
-            let profile_path = resolve_profile_path(&args.profile);
+            let (profile_input, key) = args.resolve();
+            let profile_path = resolve_profile_path(&profile_input);
             let mut profile = Profile::from_path(&profile_path)?;
             let env_path = profile.resolve_env_path(&profile_path);
             let (mut vault, password) = if env_path.exists() {
@@ -97,19 +98,19 @@ async fn run() -> Result<(), Error> {
 
             match (args.value, args.from_file, args.to_file) {
                 (Some(value), None, None) => {
-                    vault.set_plain_text(&args.key, value)?;
-                    profile.remove_file_spec(&args.key);
+                    vault.set_plain_text(&key, value)?;
+                    profile.remove_file_spec(&key);
                 }
                 (Some(value), None, Some(runtime_path)) => {
                     vault.set_file_content(
-                        &args.key,
+                        &key,
                         runtime_path.clone(),
                         value.into_bytes(),
                         mode,
                         cleanup,
                     )?;
                     profile.upsert_file_spec(
-                        &args.key,
+                        &key,
                         FileSpec {
                             target_path: runtime_path,
                             mode: format!("{mode:04o}"),
@@ -125,8 +126,8 @@ async fn run() -> Result<(), Error> {
                         })?;
                     let value = String::from_utf8(content)
                         .map_err(|_| Error::FileSourceNotUtf8 { path: source_path })?;
-                    vault.set_plain_text(&args.key, value)?;
-                    profile.remove_file_spec(&args.key);
+                    vault.set_plain_text(&key, value)?;
+                    profile.remove_file_spec(&key);
                 }
                 (None, Some(source_path), Some(runtime_path)) => {
                     let content =
@@ -134,15 +135,9 @@ async fn run() -> Result<(), Error> {
                             path: source_path,
                             source,
                         })?;
-                    vault.set_file_content(
-                        &args.key,
-                        runtime_path.clone(),
-                        content,
-                        mode,
-                        cleanup,
-                    )?;
+                    vault.set_file_content(&key, runtime_path.clone(), content, mode, cleanup)?;
                     profile.upsert_file_spec(
-                        &args.key,
+                        &key,
                         FileSpec {
                             target_path: runtime_path,
                             mode: format!("{mode:04o}"),
@@ -157,7 +152,8 @@ async fn run() -> Result<(), Error> {
             save_vault_with_password(&profile, &profile_path, &vault, password)
         }
         Command::Import(args) => {
-            let profile_path = resolve_profile_path(&args.profile);
+            let (profile_input, input_path) = args.resolve();
+            let profile_path = resolve_profile_path(&profile_input);
             let mut profile = Profile::from_path(&profile_path)?;
             let env_path = profile.resolve_env_path(&profile_path);
             let (mut vault, password) = if env_path.exists() {
@@ -170,19 +166,17 @@ async fn run() -> Result<(), Error> {
                 )
             };
 
-            let input = std::fs::read(&args.input).map_err(|source| Error::ReadFile {
-                path: args.input.clone(),
+            let input = std::fs::read(&input_path).map_err(|source| Error::ReadFile {
+                path: input_path.clone(),
                 source,
             })?;
-            let input_dir = args
-                .input
+            let input_dir = input_path
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
                 .to_path_buf();
             let vars = parse_env_bytes(&input)?;
             let vars = apply_prefix(vars, args.prefix.as_deref().unwrap_or(""))?;
-            let mut referenced_specs: BTreeMap<(PathBuf, String), FileImportSpec> =
-                BTreeMap::new();
+            let mut referenced_specs: BTreeMap<(PathBuf, String), FileImportSpec> = BTreeMap::new();
             for (key, value) in vars {
                 if let Some(reference) = parse_reference_value(&value) {
                     let mut reference_path = expand_user_home(Path::new(&reference));
@@ -217,7 +211,8 @@ async fn run() -> Result<(), Error> {
             save_vault_with_password(&profile, &profile_path, &vault, password)
         }
         Command::ImportFiles(args) => {
-            let profile_path = resolve_profile_path(&args.profile);
+            let (profile_input, input_path) = args.resolve();
+            let profile_path = resolve_profile_path(&profile_input);
             let mut profile = Profile::from_path(&profile_path)?;
             let env_path = profile.resolve_env_path(&profile_path);
             let (mut vault, password) = if env_path.exists() {
@@ -230,7 +225,7 @@ async fn run() -> Result<(), Error> {
                 )
             };
 
-            let document = load_file_import_document(&args.input)?;
+            let document = load_file_import_document(&input_path)?;
             for (key, spec) in document.files {
                 apply_file_import_spec(&mut profile, &mut vault, &key, spec)?;
             }
@@ -239,32 +234,34 @@ async fn run() -> Result<(), Error> {
             save_vault_with_password(&profile, &profile_path, &vault, password)
         }
         Command::Delete(args) => {
-            let profile_path = resolve_profile_path(&args.profile);
+            let (profile_input, key) = args.resolve();
+            let profile_path = resolve_profile_path(&profile_input);
             let mut profile = Profile::from_path(&profile_path)?;
             let (mut vault, password) = load_vault_with_lazy_password(&profile, &profile_path)?;
-            vault.delete(&args.key)?;
-            profile.remove_file_spec(&args.key);
+            vault.delete(&key)?;
+            profile.remove_file_spec(&key);
             save_profile_to_path(&profile_path, &profile)?;
             save_vault_with_password(&profile, &profile_path, &vault, password)
         }
         Command::Reveal(args) => {
-            let profile_path = resolve_profile_path(&args.profile);
+            let (profile_input, key) = args.resolve();
+            let profile_path = resolve_profile_path(&profile_input);
             let profile = Profile::from_path(&profile_path)?;
             let (vault, _) = load_vault_with_lazy_password(&profile, &profile_path)?;
             let value = vault
                 .entries()
-                .get(&args.key)
-                .ok_or_else(|| Error::MissingConfigKey(args.key.clone()))?;
+                .get(&key)
+                .ok_or_else(|| Error::MissingConfigKey(key.clone()))?;
             reveal_value(
-                &args.key,
+                &key,
                 value,
-                profile.file_spec(&args.key),
+                profile.file_spec(&key),
                 args.raw,
                 args.output.as_ref(),
             )
         }
-        Command::Run(args) => run_profile(&args.profile).await,
-        Command::Ping(args) => ping_profile(&args.profile).await,
+        Command::Run(args) => run_profile(&args.profile_or_default()).await,
+        Command::Ping(args) => ping_profile(&args.profile_or_default()).await,
     }
 }
 

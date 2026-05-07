@@ -14,13 +14,23 @@ The default folder model is:
 
 `runvault` commands can target the folder directly.
 
+If you omit the profile path, `runvault` now defaults to:
+
+```text
+./.vault
+```
+
 ## Commands
 
 ```bash
+runvault create-profile
 runvault create-profile deployments/ovh/services
 runvault encrypt .env
+runvault set DATABASE_URL --value postgres://...
 runvault set deployments/ovh/services DATABASE_URL --value postgres://...
+runvault import .env.example --prefix PROD_
 runvault import deployments/ovh/services .env.example --prefix PROD_
+runvault import-files files-spec.yaml
 runvault import-files deployments/ovh/services files-spec.yaml
 runvault set deployments/ovh/services TLS_KEY \
   --value \"secret-key\" \
@@ -31,11 +41,11 @@ runvault set deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS \
   --from-file ./gcp-service-account.json \
   --to-file .runvault/gcp-service-account.json \
   --mode 0600
-runvault delete deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS
-runvault reveal deployments/ovh/services DATABASE_URL
-runvault reveal deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS --raw
-runvault run deployments/ovh/services
-runvault ping deployments/ovh/services
+runvault delete GOOGLE_APPLICATION_CREDENTIALS
+runvault reveal DATABASE_URL
+runvault reveal GOOGLE_APPLICATION_CREDENTIALS --raw
+runvault run
+runvault ping
 runvault cache clear deployments/ovh/services
 ```
 
@@ -101,6 +111,7 @@ If `env_file` is omitted, it defaults to `env.sec` next to `runvault.yaml`.
 Bootstrap a new profile folder with:
 
 ```bash
+runvault create-profile
 runvault create-profile deployments/ovh/services
 ```
 
@@ -127,6 +138,8 @@ If a command input path is a directory, `runvault` resolves:
 - `env.sec` as the default encrypted payload path
 
 Explicit profile file paths still work.
+
+If no profile path is provided for profile-based commands, `runvault` uses `./.vault`.
 
 ## Value modes
 
@@ -181,6 +194,9 @@ Examples:
 
 ```bash
 # value -> env
+runvault set API_KEY --value abc
+
+# explicit profile
 runvault set deployments/ovh/services API_KEY --value abc
 
 # file -> env (source file must be valid UTF-8)

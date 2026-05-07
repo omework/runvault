@@ -8,6 +8,7 @@ use crate::{envfile::validate_env_key, error::Error};
 
 pub const DEFAULT_PROFILE_FILE: &str = "runvault.yaml";
 pub const DEFAULT_ENV_FILE: &str = "env.sec";
+pub const DEFAULT_PROFILE_DIR: &str = ".vault";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -369,7 +370,10 @@ mod tests {
         load_file_import_document, resolve_profile_path, save_profile_to_path,
     };
     use crate::error::Error;
-    use std::{collections::BTreeMap, path::{Path, PathBuf}};
+    use std::{
+        collections::BTreeMap,
+        path::{Path, PathBuf},
+    };
     use tempfile::tempdir;
 
     #[test]
