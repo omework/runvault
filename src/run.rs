@@ -518,6 +518,38 @@ run:
         assert!(!runtime_secret.parent().unwrap().exists());
     }
 
+    #[test]
+    fn materialize_loaded_env_creates_missing_parent_directories() {
+        let dir = tempdir().unwrap();
+        let runtime_secret = dir
+            .path()
+            .join("nested")
+            .join("tls")
+            .join("client")
+            .join("cert.pem");
+        let profile = test_profile(dir.path().to_path_buf());
+
+        let mut values = BTreeMap::new();
+        values.insert(
+            "SERVICE_CRT".to_string(),
+            VaultValue::FileContent {
+                path: PathBuf::from("nested/tls/client/cert.pem"),
+                content: b"certificate".to_vec(),
+                mode: 0o644,
+                cleanup: FileCleanup::OnExit,
+            },
+        );
+
+        let loaded = materialize_loaded_env(&profile, values).unwrap();
+        assert!(runtime_secret.exists());
+        assert_eq!(std::fs::read_to_string(&runtime_secret).unwrap(), "certificate");
+        assert!(runtime_secret.parent().unwrap().exists());
+
+        cleanup_mounted_files(loaded.mounted_files);
+        assert!(!runtime_secret.exists());
+        assert!(!runtime_secret.parent().unwrap().exists());
+    }
+
     #[tokio::test]
     async fn profile_file_specs_override_legacy_file_metadata() {
         let dir = tempdir().unwrap();
