@@ -58,8 +58,10 @@ pub struct EncryptArgs {
 
 #[derive(Debug, Args)]
 pub struct JwtArgs {
-    #[arg(value_name = "PROFILE_OR_SECRET_KEY", num_args = 1..=2)]
+    #[arg(value_name = "PROFILE_OR_KEY", num_args = 1..=2)]
     pub targets: Vec<String>,
+    #[arg(long = "signing-key", value_name = "KEY")]
+    pub signing_key: Option<String>,
     #[arg(long)]
     pub issuer: Option<String>,
     #[arg(long)]
@@ -70,8 +72,8 @@ pub struct JwtArgs {
     pub ttl: String,
     #[arg(long = "claim", value_name = "KEY=VALUE")]
     pub claims: Vec<String>,
-    #[arg(long, value_name = "PATH")]
-    pub output: Option<PathBuf>,
+    #[arg(long = "file", alias = "output", value_name = "PATH")]
+    pub file: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -253,8 +255,8 @@ mod tests {
     }
 
     #[test]
-    fn jwt_defaults_to_dot_vault_for_secret_key() {
-        let cli = Cli::try_parse_from(["runvault", "jwt", "JWT_SIGNING_SECRET"]).unwrap();
+    fn jwt_defaults_to_dot_vault_for_output_key() {
+        let cli = Cli::try_parse_from(["runvault", "jwt", "TEMPO_INGEST_TOKEN"]).unwrap();
 
         let Command::Jwt(args) = cli.command else {
             panic!("expected jwt command");
@@ -262,7 +264,7 @@ mod tests {
 
         let (profile, key) = args.resolve();
         assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
-        assert_eq!(key, "JWT_SIGNING_SECRET");
+        assert_eq!(key, "TEMPO_INGEST_TOKEN");
     }
 
     #[test]

@@ -235,10 +235,10 @@ Defaults:
 
 ## Generating a JWT
 
-You can mint an HS256 JWT from a plain-text secret already stored in the vault:
+You can mint an HS256 JWT and store it as a plain-text value in the vault:
 
 ```bash
-runvault jwt JWT_SIGNING_SECRET \
+runvault jwt CADDY_TEMPO_INGEST_TOKEN \
   --issuer runvault \
   --audience tempo \
   --subject workers-otel \
@@ -248,12 +248,14 @@ runvault jwt JWT_SIGNING_SECRET \
 Explicit profile also works:
 
 ```bash
-runvault jwt deployments/ovh/services/vault JWT_SIGNING_SECRET --audience tempo
+runvault jwt deployments/ovh/services/vault CADDY_TEMPO_INGEST_TOKEN --audience tempo
 ```
 
 Behavior:
 
-- the secret must be a plain-text vault value
+- the generated JWT is always stored back into the vault key you pass positionally
+- by default `runvault` generates a fresh signing secret internally for the token
+- if you want deterministic signing, pass `--signing-key <KEY>` and that key must already exist in the vault as a plain-text value
 - `iat` and `exp` are always added automatically
 - `--ttl` accepts:
   - seconds, for example `900`
@@ -265,8 +267,9 @@ Behavior:
   - `iss`
   - `aud`
   - `sub`
-- by default the token is written to stdout
-- `--output <path>` writes the generated token to a file instead
+- by default the token is also printed to stdout
+- `--file <path>` writes the generated token to a file instead
+- `--output <path>` remains accepted as an alias of `--file`
 
 ## Importing an existing env file
 

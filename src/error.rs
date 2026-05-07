@@ -74,6 +74,8 @@ pub enum Error {
     ReservedJwtClaim { key: String },
     #[error("config key '{key}' must be a plain-text value for JWT generation")]
     JwtSecretMustBePlainText { key: String },
+    #[error("failed to generate JWT signing secret: {0}")]
+    JwtSecretGeneration(String),
     #[error("JWT generation failed: {0}")]
     Jwt(String),
     #[error("secure store error: {0}")]

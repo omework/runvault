@@ -4,7 +4,7 @@ use runvault::{
     crypto::encrypt_env,
     envfile::{apply_prefix, parse_env_bytes, parse_reference_value},
     error::Error,
-    jwt::{JwtOptions, generate_hs256, parse_ttl_seconds},
+    jwt::{JwtOptions, generate_hs256, generate_signing_secret, parse_ttl_seconds},
     password::{prompt_password_confirm, prompt_password_once},
     profile::{
         CreateProfileOptions, FileCleanup, FileImportSpec, FileSpec, Profile, create_profile,
@@ -74,17 +74,32 @@ async fn run() -> Result<(), Error> {
             let (profile_input, key) = args.resolve();
             ensure_default_profile_exists(&profile_input)?;
             let profile_path = resolve_profile_path(&profile_input);
-            let profile = Profile::from_path(&profile_path)?;
-            let (vault, _) = load_vault_with_lazy_password(&profile, &profile_path)?;
-            let secret = match vault.entries().get(&key) {
-                Some(VaultValue::PlainText(value)) => value.as_str(),
-                Some(VaultValue::FileContent { .. }) => {
-                    return Err(Error::JwtSecretMustBePlainText { key });
+            let mut profile = Profile::from_path(&profile_path)?;
+            let env_path = profile.resolve_env_path(&profile_path);
+            let (mut vault, password) = if env_path.exists() {
+                let (vault, password) = load_vault_with_lazy_password(&profile, &profile_path)?;
+                (vault, password)
+            } else {
+                (
+                    VaultDocument::default(),
+                    password_for_new_vault(&profile_path)?,
+                )
+            };
+            let signing_secret = if let Some(signing_key) = args.signing_key.as_ref() {
+                match vault.entries().get(signing_key) {
+                    Some(VaultValue::PlainText(value)) => value.clone(),
+                    Some(VaultValue::FileContent { .. }) => {
+                        return Err(Error::JwtSecretMustBePlainText {
+                            key: signing_key.clone(),
+                        });
+                    }
+                    None => return Err(Error::MissingConfigKey(signing_key.clone())),
                 }
-                None => return Err(Error::MissingConfigKey(key)),
+            } else {
+                generate_signing_secret()?
             };
             let token = generate_hs256(
-                secret,
+                &signing_secret,
                 &JwtOptions {
                     issuer: args.issuer,
                     audience: args.audience,
@@ -93,8 +108,12 @@ async fn run() -> Result<(), Error> {
                     claims: args.claims,
                 },
             )?;
+            vault.set_plain_text(&key, token.clone())?;
+            profile.remove_file_spec(&key);
+            save_profile_to_path(&profile_path, &profile)?;
+            save_vault_with_password(&profile, &profile_path, &vault, password)?;
 
-            if let Some(output_path) = args.output {
+            if let Some(output_path) = args.file {
                 std::fs::write(&output_path, token).map_err(|source| Error::WriteFile {
                     path: output_path,
                     source,

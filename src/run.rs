@@ -542,7 +542,10 @@ run:
 
         let loaded = materialize_loaded_env(&profile, values).unwrap();
         assert!(runtime_secret.exists());
-        assert_eq!(std::fs::read_to_string(&runtime_secret).unwrap(), "certificate");
+        assert_eq!(
+            std::fs::read_to_string(&runtime_secret).unwrap(),
+            "certificate"
+        );
         assert!(runtime_secret.parent().unwrap().exists());
 
         cleanup_mounted_files(loaded.mounted_files);

@@ -1475,6 +1475,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "jsonwebtoken",
+ "rand 0.9.4",
  "reqwest",
  "rpassword",
  "serde",

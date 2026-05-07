@@ -1,5 +1,7 @@
 use crate::error::Error;
+use base64::Engine as _;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use rand::random;
 use serde_json::{Map, Number, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -39,6 +41,11 @@ pub fn generate_hs256(secret: &str, options: &JwtOptions) -> Result<String, Erro
         &EncodingKey::from_secret(secret.as_bytes()),
     )
     .map_err(|err| Error::Jwt(err.to_string()))
+}
+
+pub fn generate_signing_secret() -> Result<String, Error> {
+    let bytes: [u8; 32] = random();
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
 
 pub fn parse_ttl_seconds(input: &str) -> Result<u64, Error> {
@@ -108,7 +115,8 @@ fn current_unix_timestamp() -> Result<u64, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{JwtOptions, generate_hs256, parse_ttl_seconds};
+    use super::{JwtOptions, generate_hs256, generate_signing_secret, parse_ttl_seconds};
+    use base64::Engine as _;
     use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
     use serde_json::{Map, Value};
 
@@ -154,5 +162,14 @@ mod tests {
         assert_eq!(decoded.claims.get("scope").unwrap(), "traces.write");
         assert!(decoded.claims.get("iat").is_some());
         assert!(decoded.claims.get("exp").is_some());
+    }
+
+    #[test]
+    fn generates_random_signing_secret() {
+        let secret = generate_signing_secret().unwrap();
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(secret.as_bytes())
+            .unwrap();
+        assert_eq!(decoded.len(), 32);
     }
 }
