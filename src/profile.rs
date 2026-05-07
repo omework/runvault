@@ -201,6 +201,29 @@ pub fn resolve_profile_path(input: &Path) -> PathBuf {
     }
 }
 
+pub fn ensure_default_profile_exists(input: &Path) -> Result<(), Error> {
+    let is_default_dir = input == Path::new(DEFAULT_PROFILE_DIR);
+    let is_default_file = input == Path::new(DEFAULT_PROFILE_DIR).join(DEFAULT_PROFILE_FILE);
+    if !is_default_dir && !is_default_file {
+        return Ok(());
+    }
+
+    let profile_path = resolve_profile_path(input);
+    if profile_path.exists() {
+        return Ok(());
+    }
+
+    create_profile(
+        Path::new(DEFAULT_PROFILE_DIR),
+        &CreateProfileOptions {
+            name: None,
+            env_file: PathBuf::from(DEFAULT_ENV_FILE),
+        },
+    )?;
+
+    Ok(())
+}
+
 pub fn create_profile(path: &Path, options: &CreateProfileOptions) -> Result<PathBuf, Error> {
     let profile_dir = if path.extension().is_some_and(|value| value == "yaml") {
         path.parent()
@@ -365,9 +388,10 @@ fn validate_file_import_document(document: &FileImportDocument) -> Result<(), Er
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateProfileOptions, DEFAULT_ENV_FILE, DEFAULT_PROFILE_FILE, FileCleanup,
-        FileImportDocument, FileSpec, Profile, create_profile, expand_user_home,
-        load_file_import_document, resolve_profile_path, save_profile_to_path,
+        CreateProfileOptions, DEFAULT_ENV_FILE, DEFAULT_PROFILE_DIR, DEFAULT_PROFILE_FILE,
+        FileCleanup, FileImportDocument, FileSpec, Profile, create_profile,
+        ensure_default_profile_exists, expand_user_home, load_file_import_document,
+        resolve_profile_path, save_profile_to_path,
     };
     use crate::error::Error;
     use std::{
@@ -430,6 +454,26 @@ run:
             resolve_profile_path(dir.path()),
             dir.path().join(DEFAULT_PROFILE_FILE)
         );
+    }
+
+    #[test]
+    fn ensure_default_profile_exists_bootstraps_dot_vault() {
+        let dir = tempdir().unwrap();
+        let current = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        ensure_default_profile_exists(Path::new(DEFAULT_PROFILE_DIR)).unwrap();
+
+        let profile_path = dir
+            .path()
+            .join(DEFAULT_PROFILE_DIR)
+            .join(DEFAULT_PROFILE_FILE);
+        assert!(profile_path.exists());
+        let content = std::fs::read_to_string(profile_path).unwrap();
+        assert!(content.contains("name: .vault"));
+        assert!(content.contains("env_file: env.sec"));
+
+        std::env::set_current_dir(current).unwrap();
     }
 
     #[test]

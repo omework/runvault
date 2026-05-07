@@ -8,8 +8,8 @@ use runvault::{
     password::{prompt_password_confirm, prompt_password_once},
     profile::{
         CreateProfileOptions, FileCleanup, FileImportSpec, FileSpec, Profile, create_profile,
-        expand_user_home, load_file_import_document, parse_file_mode, resolve_profile_path,
-        save_profile_to_path,
+        ensure_default_profile_exists, expand_user_home, load_file_import_document,
+        parse_file_mode, resolve_profile_path, save_profile_to_path,
     },
     run::{ping_profile, run_profile},
     secure_store::{
@@ -72,6 +72,7 @@ async fn run() -> Result<(), Error> {
         }
         Command::Jwt(args) => {
             let (profile_input, key) = args.resolve();
+            ensure_default_profile_exists(&profile_input)?;
             let profile_path = resolve_profile_path(&profile_input);
             let profile = Profile::from_path(&profile_path)?;
             let (vault, _) = load_vault_with_lazy_password(&profile, &profile_path)?;
@@ -105,6 +106,7 @@ async fn run() -> Result<(), Error> {
         }
         Command::Set(args) => {
             let (profile_input, key) = args.resolve();
+            ensure_default_profile_exists(&profile_input)?;
             let profile_path = resolve_profile_path(&profile_input);
             let mut profile = Profile::from_path(&profile_path)?;
             let env_path = profile.resolve_env_path(&profile_path);
@@ -187,6 +189,7 @@ async fn run() -> Result<(), Error> {
         }
         Command::Import(args) => {
             let (profile_input, input_paths) = args.resolve();
+            ensure_default_profile_exists(&profile_input)?;
             let profile_path = resolve_profile_path(&profile_input);
             let mut profile = Profile::from_path(&profile_path)?;
             let env_path = profile.resolve_env_path(&profile_path);
@@ -248,6 +251,7 @@ async fn run() -> Result<(), Error> {
         }
         Command::ImportFiles(args) => {
             let (profile_input, input_paths) = args.resolve();
+            ensure_default_profile_exists(&profile_input)?;
             let profile_path = resolve_profile_path(&profile_input);
             let mut profile = Profile::from_path(&profile_path)?;
             let env_path = profile.resolve_env_path(&profile_path);
@@ -273,6 +277,7 @@ async fn run() -> Result<(), Error> {
         }
         Command::Delete(args) => {
             let (profile_input, key) = args.resolve();
+            ensure_default_profile_exists(&profile_input)?;
             let profile_path = resolve_profile_path(&profile_input);
             let mut profile = Profile::from_path(&profile_path)?;
             let (mut vault, password) = load_vault_with_lazy_password(&profile, &profile_path)?;
@@ -283,6 +288,7 @@ async fn run() -> Result<(), Error> {
         }
         Command::Reveal(args) => {
             let (profile_input, key) = args.resolve();
+            ensure_default_profile_exists(&profile_input)?;
             let profile_path = resolve_profile_path(&profile_input);
             let profile = Profile::from_path(&profile_path)?;
             let (vault, _) = load_vault_with_lazy_password(&profile, &profile_path)?;

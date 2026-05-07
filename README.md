@@ -142,6 +142,8 @@ Explicit profile file paths still work.
 
 If no profile path is provided for profile-based commands, `runvault` uses `./.vault`.
 
+If `./.vault` does not exist yet, `runvault` bootstraps it automatically the first time you use an implicit default-profile command.
+
 ## Value modes
 
 `runvault` supports two stored value types inside the encrypted payload:

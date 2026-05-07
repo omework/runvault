@@ -13,7 +13,9 @@ use crate::{
     error::Error,
     password::prompt_password_once,
     ping::{ping_target_once, ping_targets},
-    profile::{FileCleanup, Profile, parse_file_mode, resolve_profile_path},
+    profile::{
+        FileCleanup, Profile, ensure_default_profile_exists, parse_file_mode, resolve_profile_path,
+    },
     secure_store::{clear_password, load_password as load_secure_password, store_password},
     vault::{VaultValue, load_vault_with_password},
 };
@@ -46,6 +48,7 @@ struct MountedFile {
 }
 
 pub async fn run_profile(profile_path: &Path) -> Result<(), Error> {
+    ensure_default_profile_exists(profile_path)?;
     let profile_path = resolve_profile_path(profile_path);
     let profile = Profile::from_path(&profile_path)?;
     let envs = load_profile_env_prompt(&profile, &profile_path)?;
@@ -118,6 +121,7 @@ fn spawn_profile_command(
 }
 
 pub async fn ping_profile(profile_path: &Path) -> Result<(), Error> {
+    ensure_default_profile_exists(profile_path)?;
     let profile_path = resolve_profile_path(profile_path);
     let profile = Profile::from_path(&profile_path)?;
     ping_targets(&profile.pings).await
