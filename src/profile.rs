@@ -152,6 +152,14 @@ impl Profile {
         self.files.remove(key);
     }
 
+    pub fn upsert_ping_target(&mut self, target: PingTarget) {
+        if let Some(existing) = self.pings.iter_mut().find(|ping| ping.name == target.name) {
+            *existing = target;
+        } else {
+            self.pings.push(target);
+        }
+    }
+
     fn validate(&self) -> Result<(), Error> {
         if self.name.trim().is_empty() {
             return Err(Error::InvalidProfile("name must not be empty".to_string()));
@@ -389,7 +397,7 @@ fn validate_file_import_document(document: &FileImportDocument) -> Result<(), Er
 mod tests {
     use super::{
         CreateProfileOptions, DEFAULT_ENV_FILE, DEFAULT_PROFILE_DIR, DEFAULT_PROFILE_FILE,
-        FileCleanup, FileImportDocument, FileSpec, Profile, create_profile,
+        FileCleanup, FileImportDocument, FileSpec, PingTarget, Profile, create_profile,
         ensure_default_profile_exists, expand_user_home, load_file_import_document,
         resolve_profile_path, save_profile_to_path,
     };
@@ -610,6 +618,41 @@ pings:
         assert_eq!(spec.target_path, PathBuf::from("/tmp/root.crt.pem"));
         assert_eq!(spec.mode, "0644");
         assert_eq!(spec.cleanup, FileCleanup::Keep);
+    }
+
+    #[test]
+    fn upsert_ping_target_updates_existing_entry_by_name() {
+        let dir = tempdir().unwrap();
+        let mut profile = Profile {
+            name: "local".to_string(),
+            env_file: PathBuf::from(DEFAULT_ENV_FILE),
+            workdir: Some(dir.path().to_path_buf()),
+            files: BTreeMap::new(),
+            run: super::RunConfig {
+                cmd: vec!["echo".to_string(), "ok".to_string()],
+                clear_env: true,
+                pass_env: Vec::new(),
+            },
+            pings: vec![PingTarget {
+                name: "api".to_string(),
+                url: "http://127.0.0.1:8080/health".to_string(),
+                timeout_seconds: 30,
+                interval_millis: 500,
+            }],
+            implicit_workdir: true,
+        };
+
+        profile.upsert_ping_target(PingTarget {
+            name: "api".to_string(),
+            url: "http://127.0.0.1:8081/health".to_string(),
+            timeout_seconds: 10,
+            interval_millis: 250,
+        });
+
+        assert_eq!(profile.pings.len(), 1);
+        assert_eq!(profile.pings[0].url, "http://127.0.0.1:8081/health");
+        assert_eq!(profile.pings[0].timeout_seconds, 10);
+        assert_eq!(profile.pings[0].interval_millis, 250);
     }
 
     #[test]

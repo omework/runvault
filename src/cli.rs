@@ -22,7 +22,7 @@ pub enum Command {
     Delete(DeleteArgs),
     Reveal(RevealArgs),
     Run(ProfileArgs),
-    Ping(ProfileArgs),
+    Ping(PingCommand),
 }
 
 #[derive(Debug, Args)]
@@ -136,6 +136,28 @@ pub struct ProfileArgs {
     pub profile: Option<PathBuf>,
 }
 
+#[derive(Debug, Args)]
+pub struct PingCommand {
+    #[command(subcommand)]
+    pub command: Option<PingSubcommand>,
+    pub profile: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PingSubcommand {
+    Add(PingAddArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct PingAddArgs {
+    #[arg(value_name = "PROFILE_OR_NAME_OR_URL", num_args = 2..=3)]
+    pub targets: Vec<String>,
+    #[arg(long, default_value_t = 30)]
+    pub timeout_seconds: u64,
+    #[arg(long, default_value_t = 500)]
+    pub interval_millis: u64,
+}
+
 impl CacheClearArgs {
     pub fn profile_or_default(&self) -> PathBuf {
         self.profile
@@ -220,6 +242,28 @@ impl ProfileArgs {
     }
 }
 
+impl PingCommand {
+    pub fn profile_or_default(&self) -> PathBuf {
+        self.profile
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR))
+    }
+}
+
+impl PingAddArgs {
+    pub fn resolve(&self) -> (PathBuf, String, String) {
+        match self.targets.as_slice() {
+            [name, url] => (
+                PathBuf::from(DEFAULT_PROFILE_DIR),
+                name.clone(),
+                url.clone(),
+            ),
+            [profile, name, url] => (PathBuf::from(profile), name.clone(), url.clone()),
+            _ => unreachable!("clap enforces ping add target arity"),
+        }
+    }
+}
+
 fn looks_like_profile_path(path: &PathBuf) -> bool {
     if path.file_name().is_some_and(|name| name == "runvault.yaml") {
         return true;
@@ -230,7 +274,7 @@ fn looks_like_profile_path(path: &PathBuf) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, DEFAULT_PROFILE_DIR};
+    use super::{Cli, Command, DEFAULT_PROFILE_DIR, PingSubcommand};
     use clap::Parser;
     use std::{
         fs,
@@ -265,6 +309,32 @@ mod tests {
         let (profile, key) = args.resolve();
         assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
         assert_eq!(key, "TEMPO_INGEST_TOKEN");
+    }
+
+    #[test]
+    fn ping_add_defaults_to_dot_vault_for_name_and_url() {
+        let cli = Cli::try_parse_from([
+            "runvault",
+            "ping",
+            "add",
+            "api",
+            "http://127.0.0.1:8080/health",
+        ])
+        .unwrap();
+
+        let Command::Ping(args) = cli.command else {
+            panic!("expected ping command");
+        };
+        let Some(PingSubcommand::Add(add)) = args.command else {
+            panic!("expected ping add subcommand");
+        };
+
+        let (profile, name, url) = add.resolve();
+        assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
+        assert_eq!(name, "api");
+        assert_eq!(url, "http://127.0.0.1:8080/health");
+        assert_eq!(add.timeout_seconds, 30);
+        assert_eq!(add.interval_millis, 500);
     }
 
     #[test]

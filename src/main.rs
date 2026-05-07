@@ -7,8 +7,8 @@ use runvault::{
     jwt::{JwtOptions, generate_hs256, generate_signing_secret, parse_ttl_seconds},
     password::{prompt_password_confirm, prompt_password_once},
     profile::{
-        CreateProfileOptions, FileCleanup, FileImportSpec, FileSpec, Profile, create_profile,
-        ensure_default_profile_exists, expand_user_home, load_file_import_document,
+        CreateProfileOptions, FileCleanup, FileImportSpec, FileSpec, PingTarget, Profile,
+        create_profile, ensure_default_profile_exists, expand_user_home, load_file_import_document,
         parse_file_mode, resolve_profile_path, save_profile_to_path,
     },
     run::{ping_profile, run_profile},
@@ -324,7 +324,22 @@ async fn run() -> Result<(), Error> {
             )
         }
         Command::Run(args) => run_profile(&args.profile_or_default()).await,
-        Command::Ping(args) => ping_profile(&args.profile_or_default()).await,
+        Command::Ping(args) => match args.command {
+            Some(runvault::cli::PingSubcommand::Add(add)) => {
+                let (profile_input, name, url) = add.resolve();
+                ensure_default_profile_exists(&profile_input)?;
+                let profile_path = resolve_profile_path(&profile_input);
+                let mut profile = Profile::from_path(&profile_path)?;
+                profile.upsert_ping_target(PingTarget {
+                    name,
+                    url,
+                    timeout_seconds: add.timeout_seconds,
+                    interval_millis: add.interval_millis,
+                });
+                save_profile_to_path(&profile_path, &profile)
+            }
+            None => ping_profile(&args.profile_or_default()).await,
+        },
     }
 }
 

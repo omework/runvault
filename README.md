@@ -33,6 +33,7 @@ runvault import .env.example .env.local --prefix PROD_
 runvault import deployments/ovh/services .env.example .env.local --prefix PROD_
 runvault import-files files-spec.yaml tls-files.yaml
 runvault import-files deployments/ovh/services files-spec.yaml tls-files.yaml
+runvault ping add api http://127.0.0.1:8080/health
 runvault set deployments/ovh/services TLS_KEY \
   --value \"secret-key\" \
   --to-file .runvault/tls/key.pem \
@@ -143,6 +144,24 @@ Explicit profile file paths still work.
 If no profile path is provided for profile-based commands, `runvault` uses `./.vault`.
 
 If `./.vault` does not exist yet, `runvault` bootstraps it automatically the first time you use an implicit default-profile command.
+
+## Managing ping targets
+
+You can register or update a ping target directly from the CLI:
+
+```bash
+runvault ping add api http://127.0.0.1:8080/health
+runvault ping add deployments/ovh/services api https://api.example.com/health \
+  --timeout-seconds 10 \
+  --interval-millis 250
+```
+
+Behavior:
+
+- ping targets are stored in `runvault.yaml`
+- `ping add` upserts by target name
+- if the target name already exists, its URL and timing settings are updated
+- if no profile path is provided, the target is added to `./.vault/runvault.yaml`
 
 ## Value modes
 
