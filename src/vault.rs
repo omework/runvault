@@ -31,16 +31,40 @@ pub struct VaultDocument {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct StoredVaultDocument {
-    #[serde(default = "default_vault_version")]
+struct VisibleVaultDocument {
+    #[serde(default = "default_visible_vault_version")]
     version: u8,
     #[serde(default)]
-    entries: BTreeMap<String, StoredVaultValue>,
+    entries: BTreeMap<String, VisibleVaultValue>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum StoredVaultValue {
+enum VisibleVaultValue {
+    PlainText {
+        enc_base64: String,
+    },
+    FileContent {
+        path: PathBuf,
+        enc_base64: String,
+        #[serde(default = "default_file_mode")]
+        mode: u32,
+        #[serde(default)]
+        cleanup: StoredFileCleanup,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LegacyStoredVaultDocument {
+    #[serde(default = "default_legacy_vault_version")]
+    version: u8,
+    #[serde(default)]
+    entries: BTreeMap<String, LegacyStoredVaultValue>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum LegacyStoredVaultValue {
     PlainText {
         value: String,
     },
@@ -54,7 +78,11 @@ enum StoredVaultValue {
     },
 }
 
-fn default_vault_version() -> u8 {
+fn default_visible_vault_version() -> u8 {
+    2
+}
+
+fn default_legacy_vault_version() -> u8 {
     1
 }
 
@@ -145,12 +173,21 @@ pub fn load_vault_with_password(
     password: SecretString,
 ) -> Result<VaultDocument, Error> {
     let env_path = profile.resolve_env_path(profile_path);
-    let ciphertext = std::fs::read(&env_path).map_err(|source| Error::ReadFile {
+    let input = std::fs::read(&env_path).map_err(|source| Error::ReadFile {
         path: env_path.clone(),
         source,
     })?;
-    let plaintext = decrypt_env(&ciphertext, password)?;
-    parse_vault_bytes(&plaintext)
+
+    if input.iter().all(|byte| byte.is_ascii_whitespace()) {
+        return Ok(VaultDocument::default());
+    }
+
+    if let Some(visible) = try_parse_visible_vault_document(&input)? {
+        return from_visible_vault(visible, password);
+    }
+
+    let plaintext = decrypt_env(&input, password)?;
+    parse_legacy_vault_bytes(&plaintext)
 }
 
 pub fn save_vault_with_password(
@@ -160,21 +197,24 @@ pub fn save_vault_with_password(
     password: SecretString,
 ) -> Result<(), Error> {
     let env_path = profile.resolve_env_path(profile_path);
-    let plaintext = serialize_vault_bytes(vault)?;
-    let ciphertext = encrypt_env(&plaintext, password)?;
-    std::fs::write(&env_path, ciphertext).map_err(|source| Error::WriteFile {
+    let plaintext = serialize_visible_vault_bytes(vault, password)?;
+    std::fs::write(&env_path, plaintext).map_err(|source| Error::WriteFile {
         path: env_path,
         source,
     })
 }
 
 pub fn parse_vault_bytes(input: &[u8]) -> Result<VaultDocument, Error> {
+    parse_legacy_vault_bytes(input)
+}
+
+fn parse_legacy_vault_bytes(input: &[u8]) -> Result<VaultDocument, Error> {
     if input.iter().all(|byte| byte.is_ascii_whitespace()) {
         return Ok(VaultDocument::default());
     }
 
-    match serde_yaml::from_slice::<StoredVaultDocument>(input) {
-        Ok(stored) => from_stored_vault(stored),
+    match serde_yaml::from_slice::<LegacyStoredVaultDocument>(input) {
+        Ok(stored) => from_legacy_vault(stored),
         Err(_) => {
             let envs = parse_env_bytes(input)?;
             Ok(VaultDocument {
@@ -187,32 +227,47 @@ pub fn parse_vault_bytes(input: &[u8]) -> Result<VaultDocument, Error> {
     }
 }
 
-fn serialize_vault_bytes(vault: &VaultDocument) -> Result<Vec<u8>, Error> {
-    let stored = StoredVaultDocument {
-        version: default_vault_version(),
-        entries: vault
-            .entries
-            .iter()
-            .map(|(key, value)| {
-                let stored_value = match value {
-                    VaultValue::PlainText(value) => StoredVaultValue::PlainText {
-                        value: value.clone(),
-                    },
-                    VaultValue::FileContent {
-                        path,
-                        content,
-                        mode,
-                        cleanup,
-                    } => StoredVaultValue::FileContent {
-                        path: path.clone(),
-                        content_base64: STANDARD.encode(content),
-                        mode: *mode,
-                        cleanup: (*cleanup).into(),
-                    },
-                };
-                (key.clone(), stored_value)
-            })
-            .collect(),
+fn try_parse_visible_vault_document(input: &[u8]) -> Result<Option<VisibleVaultDocument>, Error> {
+    match serde_yaml::from_slice::<VisibleVaultDocument>(input) {
+        Ok(document) => Ok(Some(document)),
+        Err(_) => Ok(None),
+    }
+}
+
+fn serialize_visible_vault_bytes(
+    vault: &VaultDocument,
+    password: SecretString,
+) -> Result<Vec<u8>, Error> {
+    let entries = vault
+        .entries
+        .iter()
+        .map(|(key, value)| {
+            let stored_value = match value {
+                VaultValue::PlainText(value) => VisibleVaultValue::PlainText {
+                    enc_base64: STANDARD.encode(encrypt_env(
+                        value.as_bytes(),
+                        password.clone(),
+                    )?),
+                },
+                VaultValue::FileContent {
+                    path,
+                    content,
+                    mode,
+                    cleanup,
+                } => VisibleVaultValue::FileContent {
+                    path: path.clone(),
+                    enc_base64: STANDARD.encode(encrypt_env(content, password.clone())?),
+                    mode: *mode,
+                    cleanup: (*cleanup).into(),
+                },
+            };
+            Ok((key.clone(), stored_value))
+        })
+        .collect::<Result<BTreeMap<_, _>, Error>>()?;
+
+    let stored = VisibleVaultDocument {
+        version: default_visible_vault_version(),
+        entries,
     };
 
     serde_yaml::to_string(&stored)
@@ -220,8 +275,62 @@ fn serialize_vault_bytes(vault: &VaultDocument) -> Result<Vec<u8>, Error> {
         .map_err(|err| Error::VaultSerialize(err.to_string()))
 }
 
-fn from_stored_vault(stored: StoredVaultDocument) -> Result<VaultDocument, Error> {
-    if stored.version != default_vault_version() {
+fn from_visible_vault(
+    stored: VisibleVaultDocument,
+    password: SecretString,
+) -> Result<VaultDocument, Error> {
+    if stored.version != default_visible_vault_version() {
+        return Err(Error::VaultFormat(format!(
+            "unsupported visible vault version {}",
+            stored.version
+        )));
+    }
+
+    let mut entries = BTreeMap::new();
+    for (key, value) in stored.entries {
+        validate_key(&key)?;
+        let decoded = match value {
+            VisibleVaultValue::PlainText { enc_base64 } => {
+                let ciphertext = STANDARD
+                    .decode(enc_base64)
+                    .map_err(|source| Error::EntryCiphertextDecode {
+                        key: key.clone(),
+                        source,
+                    })?;
+                let plaintext = decrypt_env(&ciphertext, password.clone())?;
+                let value = String::from_utf8(plaintext.to_vec())
+                    .map_err(|_| Error::VaultFormat(format!("key '{key}' is not valid utf-8")))?;
+                VaultValue::PlainText(value)
+            }
+            VisibleVaultValue::FileContent {
+                path,
+                enc_base64,
+                mode,
+                cleanup,
+            } => {
+                let ciphertext = STANDARD
+                    .decode(enc_base64)
+                    .map_err(|source| Error::EntryCiphertextDecode {
+                        key: key.clone(),
+                        source,
+                    })?;
+                let content = decrypt_env(&ciphertext, password.clone())?.to_vec();
+                VaultValue::FileContent {
+                    path,
+                    content,
+                    mode,
+                    cleanup: cleanup.into(),
+                }
+            }
+        };
+        entries.insert(key, decoded);
+    }
+
+    Ok(VaultDocument { entries })
+}
+
+fn from_legacy_vault(stored: LegacyStoredVaultDocument) -> Result<VaultDocument, Error> {
+    if stored.version != default_legacy_vault_version() {
         return Err(Error::VaultFormat(format!(
             "unsupported vault version {}",
             stored.version
@@ -232,8 +341,8 @@ fn from_stored_vault(stored: StoredVaultDocument) -> Result<VaultDocument, Error
     for (key, value) in stored.entries {
         validate_key(&key)?;
         let decoded = match value {
-            StoredVaultValue::PlainText { value } => VaultValue::PlainText(value),
-            StoredVaultValue::FileContent {
+            LegacyStoredVaultValue::PlainText { value } => VaultValue::PlainText(value),
+            LegacyStoredVaultValue::FileContent {
                 path,
                 content_base64,
                 mode,
@@ -267,12 +376,14 @@ fn validate_key(key: &str) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FileCleanup, VaultDocument, VaultValue, load_vault_with_password, parse_vault_bytes,
+        FileCleanup, LegacyStoredVaultDocument, LegacyStoredVaultValue, VisibleVaultDocument,
+        VisibleVaultValue, VaultDocument, VaultValue, load_vault_with_password, parse_vault_bytes,
         save_vault_with_password,
     };
-    use crate::profile::Profile;
+    use crate::{crypto::encrypt_env, profile::Profile};
     use age::secrecy::SecretString;
-    use std::path::PathBuf;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use std::{collections::BTreeMap, path::PathBuf};
     use tempfile::tempdir;
 
     #[test]
@@ -289,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_plain_and_file_values() {
+    fn round_trips_plain_and_file_values_in_visible_format() {
         let dir = tempdir().unwrap();
         let profile_path = dir.path().join("profile.yaml");
         let env_path = dir.path().join("secret.env.enc");
@@ -326,6 +437,13 @@ run:
         .unwrap();
         assert!(env_path.exists());
 
+        let visible = std::fs::read_to_string(&env_path).unwrap();
+        assert!(visible.contains("version: 2"));
+        assert!(visible.contains("API_KEY:"));
+        assert!(visible.contains("GOOGLE_APPLICATION_CREDENTIALS:"));
+        assert!(!visible.contains("value: test"));
+        assert!(!visible.contains(r#"{"project":"demo"}"#));
+
         let loaded = load_vault_with_password(
             &profile,
             &profile_path,
@@ -344,6 +462,73 @@ run:
                 content: br#"{"project":"demo"}"#.to_vec(),
                 mode: 0o640,
                 cleanup: FileCleanup::Keep,
+            })
+        );
+    }
+
+    #[test]
+    fn loads_legacy_whole_file_encrypted_vault() {
+        let dir = tempdir().unwrap();
+        let profile_path = dir.path().join("profile.yaml");
+        let env_path = dir.path().join("secret.env.enc");
+        std::fs::write(
+            &profile_path,
+            r#"
+name: local
+env_file: secret.env.enc
+run:
+  cmd: ["/bin/sh", "-c", "exit 0"]
+"#,
+        )
+        .unwrap();
+        let profile = Profile::from_path(&profile_path).unwrap();
+
+        let legacy = LegacyStoredVaultDocument {
+            version: 1,
+            entries: BTreeMap::from([
+                (
+                    "API_KEY".to_string(),
+                    LegacyStoredVaultValue::PlainText {
+                        value: "test".to_string(),
+                    },
+                ),
+                (
+                    "GOOGLE_APPLICATION_CREDENTIALS".to_string(),
+                    LegacyStoredVaultValue::FileContent {
+                        path: PathBuf::from(".runvault/gcp.json"),
+                        content_base64: STANDARD.encode(br#"{"project":"demo"}"#),
+                        mode: 0o600,
+                        cleanup: super::StoredFileCleanup::OnExit,
+                    },
+                ),
+            ]),
+        };
+        let plaintext = serde_yaml::to_string(&legacy).unwrap();
+        let ciphertext = encrypt_env(
+            plaintext.as_bytes(),
+            SecretString::from("test-password".to_string()),
+        )
+        .unwrap();
+        std::fs::write(&env_path, ciphertext).unwrap();
+
+        let loaded = load_vault_with_password(
+            &profile,
+            &profile_path,
+            SecretString::from("test-password".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            loaded.entries().get("API_KEY"),
+            Some(&VaultValue::PlainText("test".to_string()))
+        );
+        assert_eq!(
+            loaded.entries().get("GOOGLE_APPLICATION_CREDENTIALS"),
+            Some(&VaultValue::FileContent {
+                path: PathBuf::from(".runvault/gcp.json"),
+                content: br#"{"project":"demo"}"#.to_vec(),
+                mode: 0o600,
+                cleanup: FileCleanup::OnExit,
             })
         );
     }
@@ -369,6 +554,48 @@ entries:
                 cleanup: FileCleanup::OnExit,
             })
         );
+    }
+
+    #[test]
+    fn visible_vault_document_is_password_protected_per_entry() {
+        let ciphertext = encrypt_env(
+            b"top-secret",
+            SecretString::from("test-password".to_string()),
+        )
+        .unwrap();
+        let visible = VisibleVaultDocument {
+            version: 2,
+            entries: BTreeMap::from([(
+                "SECRET".to_string(),
+                VisibleVaultValue::PlainText {
+                    enc_base64: STANDARD.encode(ciphertext),
+                },
+            )]),
+        };
+        let encoded = serde_yaml::to_string(&visible).unwrap();
+        let dir = tempdir().unwrap();
+        let profile_path = dir.path().join("profile.yaml");
+        let env_path = dir.path().join("secret.env.enc");
+        std::fs::write(
+            &profile_path,
+            r#"
+name: local
+env_file: secret.env.enc
+run:
+  cmd: ["/bin/sh", "-c", "exit 0"]
+"#,
+        )
+        .unwrap();
+        std::fs::write(&env_path, encoded).unwrap();
+        let profile = Profile::from_path(&profile_path).unwrap();
+
+        let err = load_vault_with_password(
+            &profile,
+            &profile_path,
+            SecretString::from("wrong".to_string()),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("decryption failed"));
     }
 
     #[test]

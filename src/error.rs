@@ -68,6 +68,12 @@ pub enum Error {
         #[source]
         source: base64::DecodeError,
     },
+    #[error("failed to decode stored encrypted payload for key '{key}': {source}")]
+    EntryCiphertextDecode {
+        key: String,
+        #[source]
+        source: base64::DecodeError,
+    },
     #[error("file-backed values require --to-file")]
     MissingValuePath,
     #[error("file source {path} is not valid utf-8 and cannot be stored as a plain env value")]
