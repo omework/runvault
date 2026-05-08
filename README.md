@@ -189,6 +189,7 @@ Behavior:
 - `run <bundle-file>` unpacks into a temporary profile directory and runs from there
 - password reuse for bundle execution is keyed off the bundle file path, not the temporary extraction path
 - the bundle contains only the runvault profile and encrypted env payload, not unrelated app files such as `docker-compose.yml`
+- bundle schema version `1` uses structured YAML under top-level `env` and `files`
 
 ## Managing ping targets
 
