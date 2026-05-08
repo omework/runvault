@@ -205,6 +205,11 @@ fn materialize_loaded_env(
                 envs.insert(key, display_path);
                 mounted_files.push(mount);
             }
+            VaultValue::SealedVisible(_) => {
+                return Err(Error::VaultFormat(format!(
+                    "key '{key}' was not materialized before runtime"
+                )));
+            }
         }
     }
 

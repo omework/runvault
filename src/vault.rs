@@ -23,6 +23,7 @@ pub enum VaultValue {
         mode: u32,
         cleanup: FileCleanup,
     },
+    SealedVisible(VisibleVaultValue),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -30,7 +31,7 @@ pub struct VaultDocument {
     entries: BTreeMap<String, VaultValue>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct VisibleVaultDocument {
     #[serde(default = "default_visible_vault_version")]
     version: u8,
@@ -38,9 +39,9 @@ struct VisibleVaultDocument {
     entries: BTreeMap<String, VisibleVaultValue>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum VisibleVaultValue {
+pub enum VisibleVaultValue {
     PlainText {
         enc_base64: String,
     },
@@ -92,7 +93,7 @@ fn default_file_mode() -> u32 {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
-enum StoredFileCleanup {
+pub enum StoredFileCleanup {
     #[default]
     OnExit,
     Keep,
@@ -190,6 +191,29 @@ pub fn load_vault_with_password(
     parse_legacy_vault_bytes(&plaintext)
 }
 
+pub fn load_vault_for_update_with_password(
+    profile: &Profile,
+    profile_path: &Path,
+    password: SecretString,
+) -> Result<VaultDocument, Error> {
+    let env_path = profile.resolve_env_path(profile_path);
+    let input = std::fs::read(&env_path).map_err(|source| Error::ReadFile {
+        path: env_path.clone(),
+        source,
+    })?;
+
+    if input.iter().all(|byte| byte.is_ascii_whitespace()) {
+        return Ok(VaultDocument::default());
+    }
+
+    if let Some(visible) = try_parse_visible_vault_document(&input)? {
+        return from_visible_vault_for_update(visible, password);
+    }
+
+    let plaintext = decrypt_env(&input, password)?;
+    parse_legacy_vault_bytes(&plaintext)
+}
+
 pub fn save_vault_with_password(
     profile: &Profile,
     profile_path: &Path,
@@ -244,10 +268,7 @@ fn serialize_visible_vault_bytes(
         .map(|(key, value)| {
             let stored_value = match value {
                 VaultValue::PlainText(value) => VisibleVaultValue::PlainText {
-                    enc_base64: STANDARD.encode(encrypt_env(
-                        value.as_bytes(),
-                        password.clone(),
-                    )?),
+                    enc_base64: STANDARD.encode(encrypt_env(value.as_bytes(), password.clone())?),
                 },
                 VaultValue::FileContent {
                     path,
@@ -260,6 +281,7 @@ fn serialize_visible_vault_bytes(
                     mode: *mode,
                     cleanup: (*cleanup).into(),
                 },
+                VaultValue::SealedVisible(value) => value.clone(),
             };
             Ok((key.clone(), stored_value))
         })
@@ -289,44 +311,110 @@ fn from_visible_vault(
     let mut entries = BTreeMap::new();
     for (key, value) in stored.entries {
         validate_key(&key)?;
-        let decoded = match value {
-            VisibleVaultValue::PlainText { enc_base64 } => {
-                let ciphertext = STANDARD
-                    .decode(enc_base64)
-                    .map_err(|source| Error::EntryCiphertextDecode {
-                        key: key.clone(),
-                        source,
-                    })?;
-                let plaintext = decrypt_env(&ciphertext, password.clone())?;
-                let value = String::from_utf8(plaintext.to_vec())
-                    .map_err(|_| Error::VaultFormat(format!("key '{key}' is not valid utf-8")))?;
-                VaultValue::PlainText(value)
-            }
-            VisibleVaultValue::FileContent {
-                path,
-                enc_base64,
-                mode,
-                cleanup,
-            } => {
-                let ciphertext = STANDARD
-                    .decode(enc_base64)
-                    .map_err(|source| Error::EntryCiphertextDecode {
-                        key: key.clone(),
-                        source,
-                    })?;
-                let content = decrypt_env(&ciphertext, password.clone())?.to_vec();
-                VaultValue::FileContent {
-                    path,
-                    content,
-                    mode,
-                    cleanup: cleanup.into(),
-                }
-            }
-        };
+        let decoded = decrypt_visible_value(&key, value, password.clone())?;
         entries.insert(key, decoded);
     }
 
     Ok(VaultDocument { entries })
+}
+
+fn from_visible_vault_for_update(
+    stored: VisibleVaultDocument,
+    password: SecretString,
+) -> Result<VaultDocument, Error> {
+    if stored.version != default_visible_vault_version() {
+        return Err(Error::VaultFormat(format!(
+            "unsupported visible vault version {}",
+            stored.version
+        )));
+    }
+
+    let mut entries = BTreeMap::new();
+    let mut validated_password = stored.entries.is_empty();
+
+    for (key, value) in stored.entries {
+        validate_key(&key)?;
+        if !validated_password {
+            validate_visible_entry_password(&key, &value, password.clone())?;
+            validated_password = true;
+        }
+        entries.insert(key, VaultValue::SealedVisible(value));
+    }
+
+    Ok(VaultDocument { entries })
+}
+
+fn decrypt_visible_value(
+    key: &str,
+    value: VisibleVaultValue,
+    password: SecretString,
+) -> Result<VaultValue, Error> {
+    match value {
+        VisibleVaultValue::PlainText { enc_base64 } => {
+            let ciphertext =
+                STANDARD
+                    .decode(enc_base64)
+                    .map_err(|source| Error::EntryCiphertextDecode {
+                        key: key.to_string(),
+                        source,
+                    })?;
+            let plaintext = decrypt_env(&ciphertext, password)?;
+            let value = String::from_utf8(plaintext.to_vec())
+                .map_err(|_| Error::VaultFormat(format!("key '{key}' is not valid utf-8")))?;
+            Ok(VaultValue::PlainText(value))
+        }
+        VisibleVaultValue::FileContent {
+            path,
+            enc_base64,
+            mode,
+            cleanup,
+        } => {
+            let ciphertext =
+                STANDARD
+                    .decode(enc_base64)
+                    .map_err(|source| Error::EntryCiphertextDecode {
+                        key: key.to_string(),
+                        source,
+                    })?;
+            let content = decrypt_env(&ciphertext, password)?.to_vec();
+            Ok(VaultValue::FileContent {
+                path,
+                content,
+                mode,
+                cleanup: cleanup.into(),
+            })
+        }
+    }
+}
+
+fn validate_visible_entry_password(
+    key: &str,
+    value: &VisibleVaultValue,
+    password: SecretString,
+) -> Result<(), Error> {
+    match value {
+        VisibleVaultValue::PlainText { enc_base64 } => {
+            let ciphertext =
+                STANDARD
+                    .decode(enc_base64)
+                    .map_err(|source| Error::EntryCiphertextDecode {
+                        key: key.to_string(),
+                        source,
+                    })?;
+            let _ = decrypt_env(&ciphertext, password)?;
+        }
+        VisibleVaultValue::FileContent { enc_base64, .. } => {
+            let ciphertext =
+                STANDARD
+                    .decode(enc_base64)
+                    .map_err(|source| Error::EntryCiphertextDecode {
+                        key: key.to_string(),
+                        source,
+                    })?;
+            let _ = decrypt_env(&ciphertext, password)?;
+        }
+    }
+    Ok(())
 }
 
 fn from_legacy_vault(stored: LegacyStoredVaultDocument) -> Result<VaultDocument, Error> {
@@ -376,9 +464,9 @@ fn validate_key(key: &str) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FileCleanup, LegacyStoredVaultDocument, LegacyStoredVaultValue, VisibleVaultDocument,
-        VisibleVaultValue, VaultDocument, VaultValue, load_vault_with_password, parse_vault_bytes,
-        save_vault_with_password,
+        FileCleanup, LegacyStoredVaultDocument, LegacyStoredVaultValue, VaultDocument, VaultValue,
+        VisibleVaultDocument, VisibleVaultValue, load_vault_for_update_with_password,
+        load_vault_with_password, parse_vault_bytes, save_vault_with_password,
     };
     use crate::{crypto::encrypt_env, profile::Profile};
     use age::secrecy::SecretString;
@@ -596,6 +684,75 @@ run:
         )
         .unwrap_err();
         assert!(err.to_string().contains("decryption failed"));
+    }
+
+    #[test]
+    fn update_loader_preserves_untouched_visible_ciphertext() {
+        let dir = tempdir().unwrap();
+        let profile_path = dir.path().join("profile.yaml");
+        let env_path = dir.path().join("secret.env.enc");
+        std::fs::write(
+            &profile_path,
+            r#"
+name: local
+env_file: secret.env.enc
+run:
+  cmd: ["/bin/sh", "-c", "exit 0"]
+"#,
+        )
+        .unwrap();
+        let profile = Profile::from_path(&profile_path).unwrap();
+        let password = SecretString::from("test-password".to_string());
+
+        let original_secret_ciphertext =
+            STANDARD.encode(encrypt_env(b"keep-me", password.clone()).unwrap());
+        let visible = VisibleVaultDocument {
+            version: 2,
+            entries: BTreeMap::from([
+                (
+                    "SECRET".to_string(),
+                    VisibleVaultValue::PlainText {
+                        enc_base64: original_secret_ciphertext.clone(),
+                    },
+                ),
+                (
+                    "CONFIG".to_string(),
+                    VisibleVaultValue::PlainText {
+                        enc_base64: STANDARD.encode(encrypt_env(b"old", password.clone()).unwrap()),
+                    },
+                ),
+            ]),
+        };
+        std::fs::write(&env_path, serde_yaml::to_string(&visible).unwrap()).unwrap();
+
+        let mut vault =
+            load_vault_for_update_with_password(&profile, &profile_path, password.clone()).unwrap();
+        assert!(matches!(
+            vault.entries().get("SECRET"),
+            Some(VaultValue::SealedVisible(_))
+        ));
+
+        vault.set_plain_text("CONFIG", "new".to_string()).unwrap();
+        save_vault_with_password(&profile, &profile_path, &vault, password.clone()).unwrap();
+
+        let saved: VisibleVaultDocument =
+            serde_yaml::from_str(&std::fs::read_to_string(&env_path).unwrap()).unwrap();
+        assert_eq!(
+            saved.entries.get("SECRET"),
+            Some(&VisibleVaultValue::PlainText {
+                enc_base64: original_secret_ciphertext,
+            })
+        );
+
+        let loaded = load_vault_with_password(&profile, &profile_path, password).unwrap();
+        assert_eq!(
+            loaded.entries().get("SECRET"),
+            Some(&VaultValue::PlainText("keep-me".to_string()))
+        );
+        assert_eq!(
+            loaded.entries().get("CONFIG"),
+            Some(&VaultValue::PlainText("new".to_string()))
+        );
     }
 
     #[test]

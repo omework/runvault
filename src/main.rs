@@ -16,7 +16,10 @@ use runvault::{
     secure_store::{
         clear_all_passwords, clear_password, load_password as load_secure_password, store_password,
     },
-    vault::{VaultDocument, VaultValue, load_vault_with_password, save_vault_with_password},
+    vault::{
+        VaultDocument, VaultValue, load_vault_for_update_with_password, load_vault_with_password,
+        save_vault_with_password,
+    },
 };
 use std::{
     collections::BTreeMap,
@@ -116,6 +119,9 @@ async fn run() -> Result<(), Error> {
                             key: signing_key.clone(),
                         });
                     }
+                    Some(VaultValue::SealedVisible(_)) => {
+                        unreachable!("JWT command uses the fully materialized vault loader")
+                    }
                     None => return Err(Error::MissingConfigKey(signing_key.clone())),
                 }
             } else {
@@ -153,7 +159,8 @@ async fn run() -> Result<(), Error> {
             let mut profile = Profile::from_path(&profile_path)?;
             let env_path = profile.resolve_env_path(&profile_path);
             let (mut vault, password) = if env_path.exists() {
-                let (vault, password) = load_vault_with_lazy_password(&profile, &profile_path)?;
+                let (vault, password) =
+                    load_vault_with_lazy_password_for_update(&profile, &profile_path)?;
                 (vault, password)
             } else {
                 (
@@ -240,7 +247,8 @@ async fn run() -> Result<(), Error> {
             let mut profile = Profile::from_path(&profile_path)?;
             let env_path = profile.resolve_env_path(&profile_path);
             let (mut vault, password) = if env_path.exists() {
-                let (vault, password) = load_vault_with_lazy_password(&profile, &profile_path)?;
+                let (vault, password) =
+                    load_vault_with_lazy_password_for_update(&profile, &profile_path)?;
                 (vault, password)
             } else {
                 (
@@ -302,7 +310,8 @@ async fn run() -> Result<(), Error> {
             let mut profile = Profile::from_path(&profile_path)?;
             let env_path = profile.resolve_env_path(&profile_path);
             let (mut vault, password) = if env_path.exists() {
-                let (vault, password) = load_vault_with_lazy_password(&profile, &profile_path)?;
+                let (vault, password) =
+                    load_vault_with_lazy_password_for_update(&profile, &profile_path)?;
                 (vault, password)
             } else {
                 (
@@ -326,7 +335,8 @@ async fn run() -> Result<(), Error> {
             ensure_default_profile_exists(&profile_input)?;
             let profile_path = resolve_profile_path(&profile_input);
             let mut profile = Profile::from_path(&profile_path)?;
-            let (mut vault, password) = load_vault_with_lazy_password(&profile, &profile_path)?;
+            let (mut vault, password) =
+                load_vault_with_lazy_password_for_update(&profile, &profile_path)?;
             vault.delete(&key)?;
             profile.remove_file_spec(&key);
             save_profile_to_path(&profile_path, &profile)?;
@@ -439,6 +449,29 @@ fn load_vault_with_lazy_password(
     Ok((vault, password))
 }
 
+fn load_vault_with_lazy_password_for_update(
+    profile: &Profile,
+    profile_path: &PathBuf,
+) -> Result<(VaultDocument, age::secrecy::SecretString), Error> {
+    if let Some(password) = load_secure_password(profile_path)? {
+        match load_vault_for_update_with_password(profile, profile_path, password.clone()) {
+            Ok(vault) => {
+                store_password(profile_path, &password)?;
+                return Ok((vault, password));
+            }
+            Err(Error::Decryption(_)) => {
+                clear_password(profile_path)?;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    let password = prompt_password_once()?;
+    let vault = load_vault_for_update_with_password(profile, profile_path, password.clone())?;
+    store_password(profile_path, &password)?;
+    Ok((vault, password))
+}
+
 fn password_for_new_vault(profile_path: &PathBuf) -> Result<age::secrecy::SecretString, Error> {
     if let Some(password) = load_secure_password(profile_path)? {
         store_password(profile_path, &password)?;
@@ -504,6 +537,11 @@ fn reveal_value(
                     }
                 );
             }
+        }
+        VaultValue::SealedVisible(_) => {
+            return Err(Error::VaultFormat(format!(
+                "key '{key}' was not materialized before reveal"
+            )));
         }
     }
     Ok(())
