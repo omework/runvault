@@ -69,6 +69,7 @@ async fn run() -> Result<(), Error> {
                 &BundleExportOptions {
                     version: args.version,
                     description: args.description,
+                    force: args.force,
                 },
             )
         }

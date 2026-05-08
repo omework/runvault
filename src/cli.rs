@@ -46,6 +46,8 @@ pub struct BundleArgs {
     pub version: Option<String>,
     #[arg(long)]
     pub description: Option<String>,
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -491,6 +493,19 @@ mod tests {
         let (profile, output) = args.resolve();
         assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
         assert_eq!(output, PathBuf::from("profile.bundle.yaml"));
+        assert!(!args.force);
+    }
+
+    #[test]
+    fn bundle_export_accepts_force_flag() {
+        let cli =
+            Cli::try_parse_from(["runvault", "bundle", "profile.bundle.yaml", "--force"]).unwrap();
+
+        let Command::Bundle(args) = cli.command else {
+            panic!("expected bundle command");
+        };
+
+        assert!(args.force);
     }
 
     #[test]

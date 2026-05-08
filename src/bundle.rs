@@ -68,6 +68,7 @@ pub struct BundledResourceEntry {
 pub struct BundleExportOptions {
     pub version: Option<String>,
     pub description: Option<String>,
+    pub force: bool,
 }
 
 fn default_bundle_schema_version() -> u8 {
@@ -87,7 +88,7 @@ pub fn export_bundle(
     output_path: &Path,
     options: &BundleExportOptions,
 ) -> Result<(), Error> {
-    if output_path.exists() {
+    if output_path.exists() && !options.force {
         return Err(Error::AlreadyExists(output_path.to_path_buf()));
     }
 
@@ -335,14 +336,14 @@ fn bundle_profile_resources(
     profile: &mut Profile,
     profile_path: &Path,
 ) -> Result<BTreeMap<String, BundledResourceEntry>, Error> {
-    let profile_dir = profile_path.parent().unwrap_or_else(|| Path::new("."));
+    let workdir = resolve_profile_workdir(profile, profile_path);
     let mut resources = BTreeMap::new();
 
     for (key, spec) in profile.resources().clone() {
         let source_path = if spec.source_path.is_absolute() {
             spec.source_path.clone()
         } else {
-            profile_dir.join(&spec.source_path)
+            workdir.join(&spec.source_path)
         };
         let content = fs::read(&source_path).map_err(|source| Error::ReadFile {
             path: source_path,
@@ -426,6 +427,21 @@ fn materialize_bundle_resources(base_dir: &Path, bundle: &BundleDocument) -> Res
     Ok(())
 }
 
+fn resolve_profile_workdir(profile: &Profile, profile_path: &Path) -> PathBuf {
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+    if profile.implicit_workdir {
+        return current_dir;
+    }
+    if let Some(workdir) = &profile.workdir {
+        if workdir.is_absolute() {
+            return workdir.clone();
+        }
+        return current_dir.join(workdir);
+    }
+    let _ = profile_path;
+    current_dir
+}
+
 fn serialize_visible_vault_payload_from_bundle(bundle: &BundleDocument) -> Result<Vec<u8>, Error> {
     let mut entries = BTreeMap::new();
 
@@ -467,6 +483,7 @@ fn serialize_visible_vault_payload_from_bundle(bundle: &BundleDocument) -> Resul
 mod tests {
     use super::{BundleExportOptions, export_bundle, load_bundle, materialize_bundle};
     use crate::{
+        error::Error,
         profile::Profile,
         vault::{StoredFileCleanup, VaultDocument, save_vault_with_password},
     };
@@ -477,7 +494,12 @@ mod tests {
     #[test]
     fn exports_and_materializes_bundle() {
         let dir = tempdir().unwrap();
-        let profile_path = dir.path().join("runvault.yaml");
+        let current = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let profile_dir = dir.path().join(".vault");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        let profile_path = profile_dir.join("runvault.yaml");
         let bundle_path = dir.path().join("profile.bundle.yaml");
         std::fs::write(dir.path().join("docker-compose.yml"), "services: {}\n").unwrap();
         std::fs::write(
@@ -520,11 +542,12 @@ run:
         .unwrap();
 
         export_bundle(
-            dir.path(),
+            &profile_dir,
             &bundle_path,
             &BundleExportOptions {
                 version: Some("1.2.3".to_string()),
                 description: Some("test bundle".to_string()),
+                force: false,
             },
         )
         .unwrap();
@@ -569,6 +592,8 @@ run:
                 .join(&resource.source_path)
                 .exists()
         );
+
+        std::env::set_current_dir(current).unwrap();
     }
 
     #[test]
@@ -611,11 +636,83 @@ run:
             &BundleExportOptions {
                 version: None,
                 description: None,
+                force: false,
             },
         )
         .unwrap();
 
         let bundle = load_bundle(&bundle_path).unwrap();
         assert_eq!(bundle.profile.env_file, PathBuf::from("bundle.sec"));
+    }
+
+    #[test]
+    fn export_bundle_overwrites_existing_target_when_forced() {
+        let dir = tempdir().unwrap();
+        let current = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let profile_dir = dir.path().join(".vault");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        let profile_path = profile_dir.join("runvault.yaml");
+        let bundle_path = dir.path().join("profile.bundle.yaml");
+        std::fs::write(
+            &profile_path,
+            r#"
+name: local
+env_file: env.sec
+run:
+  cmd: ["/bin/sh", "-c", "exit 0"]
+"#,
+        )
+        .unwrap();
+
+        let profile = Profile::from_path(&profile_path).unwrap();
+        let mut vault = VaultDocument::default();
+        vault
+            .set_plain_text("API_KEY", "secret".to_string())
+            .unwrap();
+        save_vault_with_password(
+            &profile,
+            &profile_path,
+            &vault,
+            SecretString::from("bundle-password".to_string()),
+        )
+        .unwrap();
+
+        std::fs::write(&bundle_path, "stale bundle\n").unwrap();
+
+        let err = export_bundle(
+            &profile_dir,
+            &bundle_path,
+            &BundleExportOptions {
+                version: None,
+                description: None,
+                force: false,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::AlreadyExists(_)));
+        assert_eq!(
+            std::fs::read_to_string(&bundle_path).unwrap(),
+            "stale bundle\n"
+        );
+
+        export_bundle(
+            &profile_dir,
+            &bundle_path,
+            &BundleExportOptions {
+                version: Some("2.0.0".to_string()),
+                description: Some("forced bundle".to_string()),
+                force: true,
+            },
+        )
+        .unwrap();
+
+        let bundle = load_bundle(&bundle_path).unwrap();
+        assert_eq!(bundle.version.as_deref(), Some("2.0.0"));
+        assert_eq!(bundle.description.as_deref(), Some("forced bundle"));
+        assert!(bundle.env.contains_key("API_KEY"));
+
+        std::env::set_current_dir(current).unwrap();
     }
 }

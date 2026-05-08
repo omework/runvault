@@ -187,6 +187,7 @@ runvault bundle services.bundle.yaml
 runvault bundle deployments/ovh/services/vault services.bundle.yaml \
   --version v1.0.0 \
   --description "OVH services deployment"
+runvault bundle deployments/ovh/services/vault services.bundle.yaml --force
 ```
 
 Run it later with:
@@ -198,6 +199,7 @@ runvault run services.bundle.yaml
 Behavior:
 
 - `bundle` defaults to `./.vault` if no profile is specified
+- existing bundle targets are rejected by default; use `--force` to overwrite them
 - `run <bundle-file>` unpacks into a temporary profile directory and runs from there
 - password reuse for bundle execution is keyed off the bundle file path, not the temporary extraction path
 - profile `resources:` are copied into the bundle and restored before execution
@@ -433,6 +435,10 @@ Behavior:
 - later spec files overwrite earlier resource entries with the same key
 - relative `src` paths are resolved relative to the YAML spec file location
 - `~` in `src` paths is expanded against `$HOME`
+- imported `to-file` values become profile `target_path` entries
+- profile `target_path` is resolved from the profile workdir at runtime
+- when exporting a bundle, relative resource `source_path` values are looked up from the same effective workdir used by `run`, after resolving any relative workdir from the current process directory
+- when `workdir` is omitted, bundle export treats the current process directory as the lookup base for relative resource `source_path`
 
 ## Importing file-backed values from a YAML spec
 
