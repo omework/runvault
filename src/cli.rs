@@ -19,7 +19,7 @@ pub enum Command {
     Encrypt(EncryptArgs),
     Jwt(JwtArgs),
     Set(SetArgs),
-    Import(ImportArgs),
+    Import(ImportCommand),
     ImportFiles(ImportFilesArgs),
     Delete(DeleteArgs),
     Reveal(RevealArgs),
@@ -127,11 +127,29 @@ pub struct SetArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct ImportArgs {
+pub struct ImportCommand {
+    #[command(subcommand)]
+    pub command: ImportSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ImportSubcommand {
+    Env(ImportEnvArgs),
+    Resources(ImportResourcesArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ImportEnvArgs {
     #[arg(value_name = "PROFILE_OR_INPUT", num_args = 1..)]
     pub targets: Vec<PathBuf>,
     #[arg(long)]
     pub prefix: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ImportResourcesArgs {
+    #[arg(value_name = "PROFILE_OR_INPUT", num_args = 1..)]
+    pub targets: Vec<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -235,7 +253,17 @@ impl JwtArgs {
     }
 }
 
-impl ImportArgs {
+impl ImportEnvArgs {
+    pub fn resolve(&self) -> (PathBuf, Vec<PathBuf>) {
+        match self.targets.as_slice() {
+            [input] => (PathBuf::from(DEFAULT_PROFILE_DIR), vec![input.clone()]),
+            [first, rest @ ..] if looks_like_profile_path(first) => (first.clone(), rest.to_vec()),
+            inputs => (PathBuf::from(DEFAULT_PROFILE_DIR), inputs.to_vec()),
+        }
+    }
+}
+
+impl ImportResourcesArgs {
     pub fn resolve(&self) -> (PathBuf, Vec<PathBuf>) {
         match self.targets.as_slice() {
             [input] => (PathBuf::from(DEFAULT_PROFILE_DIR), vec![input.clone()]),
@@ -335,7 +363,9 @@ fn looks_like_profile_path(path: &PathBuf) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, CmdSubcommand, Command, DEFAULT_PROFILE_DIR, PingSubcommand};
+    use super::{
+        Cli, CmdSubcommand, Command, DEFAULT_PROFILE_DIR, ImportSubcommand, PingSubcommand,
+    };
     use clap::Parser;
     use std::{
         fs,
@@ -345,10 +375,13 @@ mod tests {
 
     #[test]
     fn import_defaults_to_dot_vault_for_multiple_inputs() {
-        let cli = Cli::try_parse_from(["runvault", "import", ".env", ".env.local"]).unwrap();
+        let cli = Cli::try_parse_from(["runvault", "import", "env", ".env", ".env.local"]).unwrap();
 
         let Command::Import(args) = cli.command else {
             panic!("expected import command");
+        };
+        let ImportSubcommand::Env(args) = args.command else {
+            panic!("expected import env subcommand");
         };
 
         let (profile, inputs) = args.resolve();
@@ -473,6 +506,7 @@ mod tests {
         let cli = Cli::try_parse_from([
             "runvault",
             "import",
+            "env",
             profile_dir.to_str().unwrap(),
             ".env",
             ".env.local",
@@ -482,12 +516,44 @@ mod tests {
         let Command::Import(args) = cli.command else {
             panic!("expected import command");
         };
+        let ImportSubcommand::Env(args) = args.command else {
+            panic!("expected import env subcommand");
+        };
 
         let (profile, inputs) = args.resolve();
         assert_eq!(profile, profile_dir);
         assert_eq!(
             inputs,
             vec![PathBuf::from(".env"), PathBuf::from(".env.local")]
+        );
+    }
+
+    #[test]
+    fn import_resources_defaults_to_dot_vault_for_multiple_specs() {
+        let cli = Cli::try_parse_from([
+            "runvault",
+            "import",
+            "resources",
+            "resources-a.yaml",
+            "resources-b.yaml",
+        ])
+        .unwrap();
+
+        let Command::Import(args) = cli.command else {
+            panic!("expected import command");
+        };
+        let ImportSubcommand::Resources(args) = args.command else {
+            panic!("expected import resources subcommand");
+        };
+
+        let (profile, inputs) = args.resolve();
+        assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
+        assert_eq!(
+            inputs,
+            vec![
+                PathBuf::from("resources-a.yaml"),
+                PathBuf::from("resources-b.yaml")
+            ]
         );
     }
 

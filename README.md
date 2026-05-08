@@ -101,6 +101,12 @@ files:
     target_path: .runvault/gcp-service-account.json
     mode: "0600"
     cleanup: keep
+resources:
+  BUNDLED_DOCKER_COMPOSE_FILE:
+    source_path: ./docker-compose.yml
+    target_path: ./docker-compose.yml
+    mode: "0644"
+    cleanup: keep
 pings:
   - name: api
     url: http://127.0.0.1:8080/health
@@ -109,6 +115,11 @@ pings:
 ```
 
 If `env_file` is omitted, it defaults to `env.sec` next to `runvault.yaml`.
+
+Inside `runvault.yaml`, `resources:` uses profile field names:
+
+- `source_path`
+- `target_path`
 
 ## Creating a profile folder
 
@@ -167,6 +178,7 @@ You can package a profile into a single file that contains:
 - bundle metadata
 - the profile YAML
 - the encrypted `env.sec` payload
+- bundled profile resources
 
 Export a bundle with:
 
@@ -188,8 +200,8 @@ Behavior:
 - `bundle` defaults to `./.vault` if no profile is specified
 - `run <bundle-file>` unpacks into a temporary profile directory and runs from there
 - password reuse for bundle execution is keyed off the bundle file path, not the temporary extraction path
-- the bundle contains only the runvault profile and encrypted env payload, not unrelated app files such as `docker-compose.yml`
-- bundle schema version `1` uses structured YAML under top-level `env` and `files`
+- profile `resources:` are copied into the bundle and restored before execution
+- bundle schema version `1` uses structured YAML under top-level `env`, `files`, and `resources`
 
 ## Managing ping targets
 
@@ -347,20 +359,20 @@ Behavior:
 You can bulk-load an existing dotenv-style file into the encrypted vault:
 
 ```bash
-runvault import deployments/ovh/services .env.example
+runvault import env deployments/ovh/services .env.example
 ```
 
 You can also import multiple dotenv files in one call. Shell wildcards work naturally because the shell expands them before `runvault` sees the arguments:
 
 ```bash
-runvault import deployments/ovh/services .env .env.local
-runvault import deployments/ovh/services .env.*
+runvault import env deployments/ovh/services .env .env.local
+runvault import env deployments/ovh/services .env.*
 ```
 
 You can also add a prefix to every imported key before it is stored:
 
 ```bash
-runvault import deployments/ovh/services .env.example .env.local --prefix PROD_
+runvault import env deployments/ovh/services .env.example .env.local --prefix PROD_
 ```
 
 Behavior:
@@ -369,7 +381,7 @@ Behavior:
 - multiple input files are imported from left to right
 - later files overwrite earlier keys when they define the same final key
 - imported keys overwrite existing plain-text values with the same final key
-- `import` also understands inline file-spec references in env values
+- `import env` also understands inline file-spec references in env values
 - the prefix is applied before key validation
 
 Inline reference format:
@@ -384,11 +396,43 @@ Recommended notation:
 - `@.env-files.yaml`
 - use `@"path with spaces.yaml"` only when quoting is needed
 
-When `import` sees one of these values, it:
+When `import env` sees one of these values, it:
 
 - loads the referenced YAML file
 - looks up the same env key inside its `files:` map
 - imports that entry using the same semantics as `runvault import-files`
+
+## Importing resources from a YAML spec
+
+You can bulk-load profile resources from a YAML file:
+
+```bash
+runvault import resources deployments/ovh/services resources.yaml
+```
+
+Spec format:
+
+```yaml
+resources:
+  BUNDLED_DOCKER_COMPOSE_FILE:
+    src: ./docker-compose.yml
+    to-file: ./docker-compose.yml
+    mode: "0644"
+    cleanup: keep
+```
+
+This import spec format is intentionally different from `runvault.yaml`:
+
+- import spec fields are `src` and `to-file`
+- stored profile fields are `source_path` and `target_path`
+
+Behavior:
+
+- resources are written into `runvault.yaml`, not into `env.sec`
+- multiple spec files are imported from left to right
+- later spec files overwrite earlier resource entries with the same key
+- relative `src` paths are resolved relative to the YAML spec file location
+- `~` in `src` paths is expanded against `$HOME`
 
 ## Importing file-backed values from a YAML spec
 

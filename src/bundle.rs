@@ -4,13 +4,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 
 use crate::{
     error::Error,
     profile::{
-        DEFAULT_PROFILE_FILE, Profile, parse_file_mode, resolve_profile_path, save_profile_to_path,
+        DEFAULT_PROFILE_FILE, FileCleanup, Profile, ResourceSpec, parse_file_mode,
+        resolve_profile_path, save_profile_to_path,
     },
     vault::StoredFileCleanup,
 };
@@ -33,6 +35,8 @@ pub struct BundleDocument {
     pub env: BTreeMap<String, BundledEnvEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub files: BTreeMap<String, BundledFileEntry>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resources: BTreeMap<String, BundledResourceEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +52,16 @@ pub struct BundledFileEntry {
     pub mode: String,
     #[serde(default)]
     pub cleanup: StoredFileCleanup,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BundledResourceEntry {
+    pub target_path: PathBuf,
+    pub content_base64: String,
+    #[serde(default = "default_bundle_file_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub cleanup: FileCleanup,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +115,7 @@ pub fn export_bundle(
 
     let visible_vault = parse_visible_vault_payload(&env_payload)?;
     let (env, files) = split_visible_vault_entries(visible_vault)?;
+    let resources = bundle_profile_resources(&mut profile, &profile_path)?;
 
     let bundle = BundleDocument {
         schema_version: default_bundle_schema_version(),
@@ -109,6 +124,7 @@ pub fn export_bundle(
         profile,
         env,
         files,
+        resources,
     };
 
     let yaml =
@@ -161,6 +177,7 @@ pub fn materialize_bundle(bundle: &BundleDocument) -> Result<(TempDir, PathBuf),
         path: env_path,
         source,
     })?;
+    materialize_bundle_resources(dir.path(), bundle)?;
     Ok((dir, profile_path))
 }
 
@@ -191,10 +208,25 @@ fn validate_bundle(bundle: &BundleDocument) -> Result<(), Error> {
             "bundled profile env_file must be relative".to_string(),
         ));
     }
-    if bundle.env.is_empty() && bundle.files.is_empty() {
+    if bundle.env.is_empty() && bundle.files.is_empty() && bundle.resources.is_empty() {
         return Err(Error::InvalidBundle(
-            "bundle must contain env/files payload".to_string(),
+            "bundle must contain env/files/resources payload".to_string(),
         ));
+    }
+    for (key, value) in &bundle.resources {
+        if value.target_path.as_os_str().is_empty() {
+            return Err(Error::InvalidBundle(format!(
+                "bundled resource '{}' target_path must not be empty",
+                key
+            )));
+        }
+        parse_file_mode(&value.mode)?;
+        let _ = STANDARD.decode(&value.content_base64).map_err(|err| {
+            Error::InvalidBundle(format!(
+                "bundled resource '{}' content_base64 is invalid: {}",
+                key, err
+            ))
+        })?;
     }
     let _ = bundle_env_payload_bytes(bundle)?;
     Ok(())
@@ -299,6 +331,101 @@ fn split_visible_vault_entries(
     Ok((env, files))
 }
 
+fn bundle_profile_resources(
+    profile: &mut Profile,
+    profile_path: &Path,
+) -> Result<BTreeMap<String, BundledResourceEntry>, Error> {
+    let profile_dir = profile_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut resources = BTreeMap::new();
+
+    for (key, spec) in profile.resources().clone() {
+        let source_path = if spec.source_path.is_absolute() {
+            spec.source_path.clone()
+        } else {
+            profile_dir.join(&spec.source_path)
+        };
+        let content = fs::read(&source_path).map_err(|source| Error::ReadFile {
+            path: source_path,
+            source,
+        })?;
+        resources.insert(
+            key.clone(),
+            BundledResourceEntry {
+                target_path: spec.target_path.clone(),
+                content_base64: STANDARD.encode(content),
+                mode: spec.mode.clone(),
+                cleanup: spec.cleanup,
+            },
+        );
+        profile.resources.insert(
+            key.clone(),
+            ResourceSpec {
+                source_path: bundled_resource_source_path(&key, &spec),
+                target_path: spec.target_path,
+                mode: spec.mode,
+                cleanup: spec.cleanup,
+            },
+        );
+    }
+
+    Ok(resources)
+}
+
+fn bundled_resource_source_path(key: &str, spec: &ResourceSpec) -> PathBuf {
+    let file_name = spec
+        .source_path
+        .file_name()
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("resource"));
+    PathBuf::from(".runvault")
+        .join("resources")
+        .join(key)
+        .join(file_name)
+}
+
+fn materialize_bundle_resources(base_dir: &Path, bundle: &BundleDocument) -> Result<(), Error> {
+    for (key, value) in &bundle.resources {
+        let spec = bundle.profile.resources().get(key).ok_or_else(|| {
+            Error::InvalidBundle(format!(
+                "bundled profile is missing resource spec for '{}'",
+                key
+            ))
+        })?;
+        let source_path = if spec.source_path.is_absolute() {
+            return Err(Error::InvalidBundle(format!(
+                "bundled resource '{}' source_path must be relative",
+                key
+            )));
+        } else {
+            base_dir.join(&spec.source_path)
+        };
+        if let Some(parent) = source_path.parent() {
+            fs::create_dir_all(parent).map_err(|source| Error::WriteFile {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let content = STANDARD.decode(&value.content_base64).map_err(|err| {
+            Error::InvalidBundle(format!(
+                "bundled resource '{}' content_base64 is invalid: {}",
+                key, err
+            ))
+        })?;
+        fs::write(&source_path, content).map_err(|source| Error::WriteFile {
+            path: source_path.clone(),
+            source,
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = parse_file_mode(&value.mode)?;
+            let _ = fs::set_permissions(&source_path, fs::Permissions::from_mode(mode));
+        }
+    }
+    Ok(())
+}
+
 fn serialize_visible_vault_payload_from_bundle(bundle: &BundleDocument) -> Result<Vec<u8>, Error> {
     let mut entries = BTreeMap::new();
 
@@ -352,11 +479,18 @@ mod tests {
         let dir = tempdir().unwrap();
         let profile_path = dir.path().join("runvault.yaml");
         let bundle_path = dir.path().join("profile.bundle.yaml");
+        std::fs::write(dir.path().join("docker-compose.yml"), "services: {}\n").unwrap();
         std::fs::write(
             &profile_path,
             r#"
 name: local
 env_file: env.sec
+resources:
+  BUNDLED_DOCKER_COMPOSE_FILE:
+    source_path: ./docker-compose.yml
+    target_path: ./docker-compose.yml
+    mode: "0644"
+    cleanup: keep
 run:
   cmd: ["/bin/sh", "-c", "exit 0"]
 "#,
@@ -399,8 +533,10 @@ run:
         let bundle_yaml = std::fs::read_to_string(&bundle_path).unwrap();
         assert!(bundle_yaml.contains("env:"));
         assert!(bundle_yaml.contains("files:"));
+        assert!(bundle_yaml.contains("resources:"));
         assert!(bundle.env.contains_key("API_KEY"));
         assert!(bundle.files.contains_key("GOOGLE_APPLICATION_CREDENTIALS"));
+        assert!(bundle.resources.contains_key("BUNDLED_DOCKER_COMPOSE_FILE"));
         assert_eq!(
             bundle
                 .files
@@ -419,6 +555,18 @@ run:
         assert!(
             extracted_profile
                 .resolve_env_path(&extracted_profile_path)
+                .exists()
+        );
+        let resource = extracted_profile
+            .resources()
+            .get("BUNDLED_DOCKER_COMPOSE_FILE")
+            .unwrap();
+        assert_eq!(resource.target_path, PathBuf::from("./docker-compose.yml"));
+        assert!(
+            extracted_profile_path
+                .parent()
+                .unwrap()
+                .join(&resource.source_path)
                 .exists()
         );
     }

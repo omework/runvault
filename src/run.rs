@@ -14,7 +14,8 @@ use crate::{
     password::prompt_password_once,
     ping::{ping_target_once, ping_targets},
     profile::{
-        FileCleanup, Profile, ensure_default_profile_exists, parse_file_mode, resolve_profile_path,
+        FileCleanup, Profile, ensure_default_profile_exists, expand_user_home, parse_file_mode,
+        resolve_profile_path,
     },
     secure_store::{clear_password, load_password as load_secure_password, store_password},
     vault::{VaultValue, load_vault_with_password},
@@ -164,16 +165,17 @@ fn load_profile_env_with_password(
     password: age::secrecy::SecretString,
 ) -> Result<LoadedProfileEnv, Error> {
     let vault = load_vault_with_password(profile, profile_path, password)?;
-    materialize_loaded_env(profile, vault.into_entries())
+    materialize_loaded_env(profile_path, profile, vault.into_entries())
 }
 
 fn materialize_loaded_env(
+    profile_path: &Path,
     profile: &Profile,
     values: BTreeMap<String, VaultValue>,
 ) -> Result<LoadedProfileEnv, Error> {
     let workdir = resolve_workdir(profile);
     let mut envs = BTreeMap::new();
-    let mut mounted_files = Vec::new();
+    let mut mounted_files = materialize_profile_resources(profile_path, profile, &workdir)?;
 
     for (key, value) in values {
         match value {
@@ -217,6 +219,46 @@ fn materialize_loaded_env(
         envs,
         mounted_files,
     })
+}
+
+fn materialize_profile_resources(
+    profile_path: &Path,
+    profile: &Profile,
+    workdir: &Path,
+) -> Result<Vec<MountedFile>, Error> {
+    let profile_dir = if profile_path.is_dir() {
+        profile_path
+    } else {
+        profile_path.parent().unwrap_or_else(|| Path::new("."))
+    };
+    let mut mounted_files = Vec::new();
+
+    for spec in profile.resources().values() {
+        let source_path = expand_user_home(&spec.source_path);
+        let resolved_source_path = if source_path.is_absolute() {
+            source_path
+        } else {
+            profile_dir.join(source_path)
+        };
+        let content = fs::read(&resolved_source_path).map_err(|source| Error::ReadFile {
+            path: resolved_source_path,
+            source,
+        })?;
+        let resolved_target_path = if spec.target_path.is_absolute() {
+            spec.target_path.clone()
+        } else {
+            workdir.join(&spec.target_path)
+        };
+        let mount = write_runtime_file(
+            &resolved_target_path,
+            &content,
+            parse_file_mode(&spec.mode)?,
+            spec.cleanup,
+        )?;
+        mounted_files.push(mount);
+    }
+
+    Ok(mounted_files)
 }
 
 fn write_runtime_file(
@@ -346,7 +388,7 @@ mod tests {
     };
     use crate::{
         error::Error,
-        profile::{FileCleanup, FileSpec, PingTarget, Profile, RunConfig},
+        profile::{FileCleanup, FileSpec, PingTarget, Profile, ResourceSpec, RunConfig},
         vault::{VaultDocument, VaultValue, save_vault_with_password},
     };
     use age::secrecy::SecretString;
@@ -366,6 +408,7 @@ mod tests {
             env_file: PathBuf::from("secret.env.enc"),
             workdir: Some(workdir),
             files: BTreeMap::new(),
+            resources: BTreeMap::new(),
             run: RunConfig {
                 cmd: vec![
                     "/bin/sh".to_string(),
@@ -518,7 +561,7 @@ run:
             },
         );
 
-        let loaded = materialize_loaded_env(&profile, values).unwrap();
+        let loaded = materialize_loaded_env(dir.path(), &profile, values).unwrap();
         assert!(runtime_secret.exists());
 
         run_profile_with_loaded_env(&profile, loaded).await.unwrap();
@@ -553,7 +596,7 @@ run:
             },
         );
 
-        let loaded = materialize_loaded_env(&profile, values).unwrap();
+        let loaded = materialize_loaded_env(dir.path(), &profile, values).unwrap();
         assert!(runtime_secret.exists());
         assert_eq!(
             std::fs::read_to_string(&runtime_secret).unwrap(),
@@ -597,7 +640,7 @@ run:
             },
         );
 
-        let loaded = materialize_loaded_env(&profile, values).unwrap();
+        let loaded = materialize_loaded_env(dir.path(), &profile, values).unwrap();
         assert!(runtime_secret.exists());
         run_profile_with_loaded_env(&profile, loaded).await.unwrap();
         assert_eq!(
@@ -623,10 +666,38 @@ run:
             },
         );
 
-        let loaded = materialize_loaded_env(&profile, values).unwrap();
+        let loaded = materialize_loaded_env(dir.path(), &profile, values).unwrap();
         assert!(runtime_secret.exists());
         cleanup_mounted_files(loaded.mounted_files);
         assert!(runtime_secret.exists());
+    }
+
+    #[test]
+    fn materialize_loaded_env_materializes_profile_resources() {
+        let dir = tempdir().unwrap();
+        let resource_source = dir.path().join("docker-compose.yml");
+        let runtime_compose = dir.path().join("runtime").join("docker-compose.yml");
+        std::fs::write(&resource_source, "services: {}\n").unwrap();
+
+        let mut profile = test_profile(dir.path().join("runtime"));
+        profile.resources.insert(
+            "BUNDLED_DOCKER_COMPOSE_FILE".to_string(),
+            ResourceSpec {
+                source_path: PathBuf::from("./docker-compose.yml"),
+                target_path: PathBuf::from("./docker-compose.yml"),
+                mode: "0644".to_string(),
+                cleanup: FileCleanup::Keep,
+            },
+        );
+
+        let loaded = materialize_loaded_env(dir.path(), &profile, BTreeMap::new()).unwrap();
+        assert!(runtime_compose.exists());
+        assert_eq!(
+            std::fs::read_to_string(&runtime_compose).unwrap(),
+            "services: {}\n"
+        );
+        cleanup_mounted_files(loaded.mounted_files);
+        assert!(runtime_compose.exists());
     }
 
     #[tokio::test]

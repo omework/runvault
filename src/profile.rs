@@ -28,6 +28,16 @@ pub struct FileSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceSpec {
+    pub source_path: PathBuf,
+    pub target_path: PathBuf,
+    #[serde(default = "default_file_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub cleanup: FileCleanup,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileImportSpec {
     pub src: PathBuf,
     #[serde(
@@ -50,6 +60,23 @@ pub struct FileImportDocument {
     pub files: BTreeMap<String, FileImportSpec>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceImportSpec {
+    pub src: PathBuf,
+    #[serde(rename = "to-file", alias = "to_file", alias = "target_path")]
+    pub to_file: PathBuf,
+    #[serde(default = "default_file_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub cleanup: FileCleanup,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ResourceImportDocument {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resources: BTreeMap<String, ResourceImportSpec>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
     pub name: String,
@@ -59,6 +86,8 @@ pub struct Profile {
     pub workdir: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub files: BTreeMap<String, FileSpec>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resources: BTreeMap<String, ResourceSpec>,
     pub run: RunConfig,
     #[serde(default)]
     pub pings: Vec<PingTarget>,
@@ -144,6 +173,10 @@ impl Profile {
         self.files.get(key)
     }
 
+    pub fn resources(&self) -> &BTreeMap<String, ResourceSpec> {
+        &self.resources
+    }
+
     pub fn upsert_file_spec(&mut self, key: &str, spec: FileSpec) {
         self.files.insert(key.to_string(), spec);
     }
@@ -192,6 +225,27 @@ impl Profile {
             if spec.target_path.as_os_str().is_empty() {
                 return Err(Error::InvalidProfile(format!(
                     "file spec '{}' target_path must not be empty",
+                    key
+                )));
+            }
+            parse_file_mode(&spec.mode)?;
+        }
+        for (key, spec) in &self.resources {
+            if !validate_env_key(key) {
+                return Err(Error::InvalidProfile(format!(
+                    "resource key '{}' is not a valid env key",
+                    key
+                )));
+            }
+            if spec.source_path.as_os_str().is_empty() {
+                return Err(Error::InvalidProfile(format!(
+                    "resource '{}' source_path must not be empty",
+                    key
+                )));
+            }
+            if spec.target_path.as_os_str().is_empty() {
+                return Err(Error::InvalidProfile(format!(
+                    "resource '{}' target_path must not be empty",
                     key
                 )));
             }
@@ -272,6 +326,7 @@ pub fn create_profile(path: &Path, options: &CreateProfileOptions) -> Result<Pat
         env_file,
         workdir: None,
         files: BTreeMap::new(),
+        resources: BTreeMap::new(),
         run: RunConfig {
             cmd: vec![
                 "echo".to_string(),
@@ -338,6 +393,27 @@ pub fn load_file_import_document(path: &Path) -> Result<FileImportDocument, Erro
     Ok(document)
 }
 
+pub fn load_resource_import_document(path: &Path) -> Result<ResourceImportDocument, Error> {
+    let content = std::fs::read_to_string(path).map_err(|source| Error::ReadFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut document: ResourceImportDocument =
+        serde_yaml::from_str(&content).map_err(|source| Error::ImportSpecParse {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    validate_resource_import_document(&document)?;
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    for spec in document.resources.values_mut() {
+        spec.src = expand_user_home(&spec.src);
+        if spec.src.is_relative() {
+            spec.src = base_dir.join(&spec.src);
+        }
+    }
+    Ok(document)
+}
+
 pub fn expand_user_home(path: &Path) -> PathBuf {
     let Some(raw) = path.to_str() else {
         return path.to_path_buf();
@@ -393,13 +469,44 @@ fn validate_file_import_document(document: &FileImportDocument) -> Result<(), Er
     Ok(())
 }
 
+fn validate_resource_import_document(document: &ResourceImportDocument) -> Result<(), Error> {
+    if document.resources.is_empty() {
+        return Err(Error::InvalidImportSpec(
+            "resources must contain at least one entry".to_string(),
+        ));
+    }
+    for (key, spec) in &document.resources {
+        if !validate_env_key(key) {
+            return Err(Error::InvalidImportSpec(format!(
+                "resource import key '{}' is not a valid env key",
+                key
+            )));
+        }
+        if spec.src.as_os_str().is_empty() {
+            return Err(Error::InvalidImportSpec(format!(
+                "resource import '{}' src must not be empty",
+                key
+            )));
+        }
+        if spec.to_file.as_os_str().is_empty() {
+            return Err(Error::InvalidImportSpec(format!(
+                "resource import '{}' to-file must not be empty",
+                key
+            )));
+        }
+        parse_file_mode(&spec.mode)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         CreateProfileOptions, DEFAULT_ENV_FILE, DEFAULT_PROFILE_DIR, DEFAULT_PROFILE_FILE,
-        FileCleanup, FileImportDocument, FileSpec, PingTarget, Profile, create_profile,
-        ensure_default_profile_exists, expand_user_home, load_file_import_document,
-        resolve_profile_path, save_profile_to_path,
+        FileCleanup, FileImportDocument, FileSpec, PingTarget, Profile, ResourceImportDocument,
+        ResourceSpec, create_profile, ensure_default_profile_exists, expand_user_home,
+        load_file_import_document, load_resource_import_document, resolve_profile_path,
+        save_profile_to_path,
     };
     use crate::error::Error;
     use std::{
@@ -595,6 +702,7 @@ pings:
             env_file: PathBuf::from(DEFAULT_ENV_FILE),
             workdir: Some(dir.path().to_path_buf()),
             files: BTreeMap::new(),
+            resources: BTreeMap::new(),
             run: super::RunConfig {
                 cmd: vec!["echo".to_string(), "ok".to_string()],
                 clear_env: true,
@@ -621,6 +729,46 @@ pings:
     }
 
     #[test]
+    fn save_profile_persists_resources() {
+        let dir = tempdir().unwrap();
+        let profile_path = dir.path().join(DEFAULT_PROFILE_FILE);
+        let mut profile = Profile {
+            name: "local".to_string(),
+            env_file: PathBuf::from(DEFAULT_ENV_FILE),
+            workdir: Some(dir.path().to_path_buf()),
+            files: BTreeMap::new(),
+            resources: BTreeMap::new(),
+            run: super::RunConfig {
+                cmd: vec!["echo".to_string(), "ok".to_string()],
+                clear_env: true,
+                pass_env: Vec::new(),
+            },
+            pings: Vec::new(),
+            implicit_workdir: true,
+        };
+        profile.resources.insert(
+            "BUNDLED_DOCKER_COMPOSE_FILE".to_string(),
+            ResourceSpec {
+                source_path: PathBuf::from("./docker-compose.yml"),
+                target_path: PathBuf::from("./docker-compose.yml"),
+                mode: "0644".to_string(),
+                cleanup: FileCleanup::Keep,
+            },
+        );
+
+        save_profile_to_path(&profile_path, &profile).unwrap();
+        let reloaded = Profile::from_path(&profile_path).unwrap();
+        let spec = reloaded
+            .resources()
+            .get("BUNDLED_DOCKER_COMPOSE_FILE")
+            .unwrap();
+        assert_eq!(spec.source_path, PathBuf::from("./docker-compose.yml"));
+        assert_eq!(spec.target_path, PathBuf::from("./docker-compose.yml"));
+        assert_eq!(spec.mode, "0644");
+        assert_eq!(spec.cleanup, FileCleanup::Keep);
+    }
+
+    #[test]
     fn upsert_ping_target_updates_existing_entry_by_name() {
         let dir = tempdir().unwrap();
         let mut profile = Profile {
@@ -628,6 +776,7 @@ pings:
             env_file: PathBuf::from(DEFAULT_ENV_FILE),
             workdir: Some(dir.path().to_path_buf()),
             files: BTreeMap::new(),
+            resources: BTreeMap::new(),
             run: super::RunConfig {
                 cmd: vec!["echo".to_string(), "ok".to_string()],
                 clear_env: true,
@@ -776,6 +925,70 @@ files:
             spec.to_file.as_ref().unwrap(),
             &PathBuf::from("/tls/service.crt.pem")
         );
+    }
+
+    #[test]
+    fn loads_resource_import_document_and_resolves_relative_src_paths() {
+        let dir = tempdir().unwrap();
+        let spec_path = dir.path().join("resources.yaml");
+        std::fs::write(
+            &spec_path,
+            r#"
+resources:
+  BUNDLED_DOCKER_COMPOSE_FILE:
+    src: ../docker-compose.yml
+    to-file: ./docker-compose.yml
+    mode: "0644"
+    cleanup: keep
+"#,
+        )
+        .unwrap();
+
+        let document = load_resource_import_document(&spec_path).unwrap();
+        let spec = document
+            .resources
+            .get("BUNDLED_DOCKER_COMPOSE_FILE")
+            .unwrap();
+        assert_eq!(spec.src, dir.path().join("../docker-compose.yml"));
+        assert_eq!(spec.to_file, PathBuf::from("./docker-compose.yml"));
+        assert_eq!(spec.mode, "0644");
+        assert_eq!(spec.cleanup, FileCleanup::Keep);
+    }
+
+    #[test]
+    fn rejects_empty_resource_import_document() {
+        let dir = tempdir().unwrap();
+        let spec_path = dir.path().join("resources.yaml");
+        std::fs::write(&spec_path, "resources: {}\n").unwrap();
+
+        let err = load_resource_import_document(&spec_path).unwrap_err();
+        assert!(matches!(err, Error::InvalidImportSpec(_)));
+        assert!(
+            err.to_string()
+                .contains("resources must contain at least one entry")
+        );
+    }
+
+    #[test]
+    fn resource_import_document_defaults_mode_and_cleanup() {
+        let document: ResourceImportDocument = serde_yaml::from_str(
+            r#"
+resources:
+  BUNDLED_DOCKER_COMPOSE_FILE:
+    src: ./docker-compose.yml
+    to-file: ./docker-compose.yml
+"#,
+        )
+        .unwrap();
+
+        let spec = document
+            .resources
+            .get("BUNDLED_DOCKER_COMPOSE_FILE")
+            .unwrap();
+        assert_eq!(spec.src, PathBuf::from("./docker-compose.yml"));
+        assert_eq!(spec.to_file, PathBuf::from("./docker-compose.yml"));
+        assert_eq!(spec.mode, "0600");
+        assert_eq!(spec.cleanup, FileCleanup::OnExit);
     }
 
     #[test]
