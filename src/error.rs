@@ -100,6 +100,8 @@ pub enum Error {
     ChildExitedEarly,
     #[error("runtime file path already exists: {0}")]
     RuntimeFilePathExists(PathBuf),
+    #[error("PKI error: {0}")]
+    Pki(String),
     #[error("bundle is invalid: {0}")]
     InvalidBundle(String),
     #[error("command failed with status {0}")]

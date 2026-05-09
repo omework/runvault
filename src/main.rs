@@ -1,12 +1,13 @@
 use clap::Parser;
 use runvault::{
     bundle::{BundleExportOptions, export_bundle, load_bundle, materialize_bundle},
-    cli::{CacheSubcommand, Cli, CmdSubcommand, Command, ImportSubcommand},
+    cli::{CacheSubcommand, Cli, CmdSubcommand, Command, ImportSubcommand, PkiSubcommand},
     crypto::encrypt_env,
     envfile::{apply_prefix, parse_env_bytes, parse_reference_value},
     error::Error,
     jwt::{JwtOptions, generate_hs256, generate_signing_secret, parse_ttl_seconds},
     password::{prompt_password_confirm, prompt_password_once},
+    pki::{PkiInitOptions, PkiIssueOptions, init_profile_pki, issue_profile_certificate},
     profile::{
         CreateProfileOptions, FileCleanup, FileImportSpec, FileSpec, PingTarget, Profile,
         ResourceImportSpec, ResourceSpec, create_profile, ensure_default_profile_exists,
@@ -25,6 +26,7 @@ use runvault::{
 use std::{
     collections::BTreeMap,
     io::Write,
+    net::IpAddr,
     path::{Path, PathBuf},
 };
 
@@ -245,6 +247,54 @@ async fn run() -> Result<(), Error> {
             save_profile_to_path(&profile_path, &profile)?;
             save_vault_with_password(&profile, &profile_path, &vault, password)
         }
+        Command::Pki(args) => match args.command {
+            PkiSubcommand::Init(args) => {
+                let profile_input = global_profile
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from(runvault::profile::DEFAULT_PROFILE_DIR));
+                ensure_default_profile_exists(&profile_input)?;
+                let profile_path = resolve_profile_path(&profile_input);
+                let created = init_profile_pki(
+                    &profile_path,
+                    &PkiInitOptions {
+                        common_name: args.common_name,
+                        days: args.days,
+                    },
+                )?;
+                println!("{}", created.display());
+                Ok(())
+            }
+            PkiSubcommand::Issue(args) => {
+                let profile_input = global_profile
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from(runvault::profile::DEFAULT_PROFILE_DIR));
+                ensure_default_profile_exists(&profile_input)?;
+                let profile_path = resolve_profile_path(&profile_input);
+                let ip_addrs = args
+                    .ip_addrs
+                    .into_iter()
+                    .map(|value| {
+                        value
+                            .parse::<IpAddr>()
+                            .map_err(|_| Error::Pki(format!("invalid IP address '{}'", value)))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let created = issue_profile_certificate(
+                    &profile_path,
+                    &args.name,
+                    &PkiIssueOptions {
+                        common_name: args.common_name,
+                        dns_names: args.dns_names,
+                        ip_addrs,
+                        client: args.client,
+                        server: args.server,
+                        days: args.days,
+                    },
+                )?;
+                println!("{}", created.display());
+                Ok(())
+            }
+        },
         Command::Import(args) => match args.command {
             ImportSubcommand::Env(args) => {
                 let (profile_input, input_paths) = args.resolve(global_profile);

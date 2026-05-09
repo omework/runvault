@@ -51,6 +51,9 @@ runvault import-files deployments/ovh/services files-spec.yaml tls-files.yaml
 runvault cmd set -- docker compose up -d
 runvault --profile deployments/ovh/services cmd set -- docker compose up -d
 runvault ping add api http://127.0.0.1:8080/health
+runvault --profile deployments/ovh/services pki init
+runvault --profile deployments/ovh/services pki issue glt.market --dns glt.market --server
+runvault --profile deployments/ovh/services pki issue mazie-client --client
 runvault set deployments/ovh/services TLS_KEY \
   --value \"secret-key\" \
   --to-file .runvault/tls/key.pem \
@@ -72,6 +75,20 @@ runvault cache clear deployments/ovh/services
 - `runvault.yaml`
 
 It does not create `env.sec`; that file is created lazily by the first `set` or `import`.
+
+`pki` keeps certificate material next to the profile under:
+
+```text
+<profile-folder>/pki/
+  ca/root/root.key.pem
+  ca/root/root.crt.pem
+  ca/root/root.chain.pem
+  issued/<name>/<name>.key.pem
+  issued/<name>/<name>.crt.pem
+  issued/<name>/<name>.chain.pem
+```
+
+`runvault pki init` creates the profile root CA. `runvault pki issue` signs a leaf with that root. If you do not pass `--client` or `--server`, the issued cert gets both usages. If you issue a server cert without any `--dns` or `--ip` SANs, `runvault` uses the certificate name as the default DNS SAN.
 
 ## Secure password reuse
 

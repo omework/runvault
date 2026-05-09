@@ -21,6 +21,7 @@ pub enum Command {
     Encrypt(EncryptArgs),
     Jwt(JwtArgs),
     Set(SetArgs),
+    Pki(PkiCommand),
     Import(ImportCommand),
     ImportFiles(ImportFilesArgs),
     Delete(DeleteArgs),
@@ -134,6 +135,43 @@ pub struct SetArgs {
 pub struct ImportCommand {
     #[command(subcommand)]
     pub command: ImportSubcommand,
+}
+
+#[derive(Debug, Args)]
+pub struct PkiCommand {
+    #[command(subcommand)]
+    pub command: PkiSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PkiSubcommand {
+    Init(PkiInitArgs),
+    Issue(PkiIssueArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct PkiInitArgs {
+    #[arg(long = "common-name", value_name = "NAME")]
+    pub common_name: Option<String>,
+    #[arg(long, default_value_t = 3650)]
+    pub days: u32,
+}
+
+#[derive(Debug, Args)]
+pub struct PkiIssueArgs {
+    pub name: String,
+    #[arg(long = "common-name", value_name = "NAME")]
+    pub common_name: Option<String>,
+    #[arg(long = "dns", value_name = "NAME")]
+    pub dns_names: Vec<String>,
+    #[arg(long = "ip", value_name = "ADDR")]
+    pub ip_addrs: Vec<String>,
+    #[arg(long)]
+    pub client: bool,
+    #[arg(long)]
+    pub server: bool,
+    #[arg(long, default_value_t = 825)]
+    pub days: u32,
 }
 
 #[derive(Debug, Subcommand)]
@@ -438,6 +476,7 @@ fn looks_like_profile_path(path: &PathBuf) -> bool {
 mod tests {
     use super::{
         Cli, CmdSubcommand, Command, DEFAULT_PROFILE_DIR, ImportSubcommand, PingSubcommand,
+        PkiSubcommand,
     };
     use clap::Parser;
     use std::{
@@ -604,6 +643,57 @@ mod tests {
         let (profile, key) = args.resolve(global_profile);
         assert_eq!(profile, PathBuf::from("deployments/ovh/services"));
         assert_eq!(key, "DATABASE_URL");
+    }
+
+    #[test]
+    fn pki_init_accepts_global_profile_flag() {
+        let cli = Cli::try_parse_from([
+            "runvault",
+            "--profile",
+            "deployments/ovh/services",
+            "pki",
+            "init",
+            "--days",
+            "3650",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.profile, Some(PathBuf::from("deployments/ovh/services")));
+        let Command::Pki(args) = cli.command else {
+            panic!("expected pki command");
+        };
+        let PkiSubcommand::Init(args) = args.command else {
+            panic!("expected pki init subcommand");
+        };
+        assert_eq!(args.days, 3650);
+    }
+
+    #[test]
+    fn pki_issue_parses_dns_and_ip_options() {
+        let cli = Cli::try_parse_from([
+            "runvault",
+            "pki",
+            "issue",
+            "api.service.local",
+            "--dns",
+            "api.service.local",
+            "--ip",
+            "127.0.0.1",
+            "--server",
+        ])
+        .unwrap();
+
+        let Command::Pki(args) = cli.command else {
+            panic!("expected pki command");
+        };
+        let PkiSubcommand::Issue(args) = args.command else {
+            panic!("expected pki issue subcommand");
+        };
+        assert_eq!(args.name, "api.service.local");
+        assert_eq!(args.dns_names, vec!["api.service.local"]);
+        assert_eq!(args.ip_addrs, vec!["127.0.0.1"]);
+        assert!(args.server);
+        assert!(!args.client);
     }
 
     #[test]

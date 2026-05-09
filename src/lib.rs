@@ -6,6 +6,7 @@ pub mod error;
 pub mod jwt;
 pub mod password;
 pub mod ping;
+pub mod pki;
 pub mod profile;
 pub mod run;
 pub mod secure_store;
