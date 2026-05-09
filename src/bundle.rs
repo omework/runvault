@@ -18,9 +18,11 @@ use crate::{
 };
 
 const BUNDLE_SCHEMA_VERSION: u8 = 1;
-const VISIBLE_VAULT_VERSION: u8 = 2;
+const VISIBLE_VAULT_VERSION: u8 = 3;
 const BUNDLE_DEFAULT_FILE_MODE: &str = "0600";
 const VISIBLE_VAULT_DEFAULT_FILE_MODE: u32 = 0o600;
+const VISIBLE_VAULT_DEFAULT_CIPHER: &str = "aes_256_gcm";
+const VISIBLE_VAULT_DEFAULT_PBKDF2_ROUNDS: u32 = crate::crypto::DEFAULT_VAULT_PBKDF2_ROUNDS;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BundleDocument {
@@ -31,6 +33,8 @@ pub struct BundleDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub profile: Profile,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_vault_crypto: Option<VisibleVaultCryptoMetadata>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, BundledEnvEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -42,12 +46,16 @@ pub struct BundleDocument {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BundledEnvEntry {
     pub enc_base64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nonce_base64: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BundledFileEntry {
     pub path: PathBuf,
     pub enc_base64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nonce_base64: Option<String>,
     #[serde(default = "default_bundle_file_mode")]
     pub mode: String,
     #[serde(default)]
@@ -64,6 +72,15 @@ pub struct BundledResourceEntry {
     pub cleanup: FileCleanup,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VisibleVaultCryptoMetadata {
+    #[serde(default = "default_visible_vault_cipher")]
+    pub cipher: String,
+    pub salt_base64: String,
+    #[serde(default = "default_visible_vault_pbkdf2_rounds")]
+    pub pbkdf2_rounds: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct BundleExportOptions {
     pub version: Option<String>,
@@ -73,6 +90,14 @@ pub struct BundleExportOptions {
 
 fn default_bundle_schema_version() -> u8 {
     BUNDLE_SCHEMA_VERSION
+}
+
+fn default_visible_vault_cipher() -> String {
+    VISIBLE_VAULT_DEFAULT_CIPHER.to_string()
+}
+
+fn default_visible_vault_pbkdf2_rounds() -> u32 {
+    VISIBLE_VAULT_DEFAULT_PBKDF2_ROUNDS
 }
 
 fn default_visible_vault_file_mode() -> u32 {
@@ -115,7 +140,7 @@ pub fn export_bundle(
     }
 
     let visible_vault = parse_visible_vault_payload(&env_payload)?;
-    let (env, files) = split_visible_vault_entries(visible_vault)?;
+    let (visible_vault_crypto, env, files) = split_visible_vault_entries(visible_vault)?;
     let resources = bundle_profile_resources(&mut profile, &profile_path)?;
 
     let bundle = BundleDocument {
@@ -123,6 +148,7 @@ pub fn export_bundle(
         version: options.version.clone(),
         description: options.description.clone(),
         profile,
+        visible_vault_crypto,
         env,
         files,
         resources,
@@ -242,6 +268,8 @@ struct VisibleVaultDocument {
     #[serde(default = "default_visible_vault_version")]
     version: u8,
     #[serde(default)]
+    crypto: Option<VisibleVaultCryptoMetadata>,
+    #[serde(default)]
     entries: BTreeMap<String, VisibleVaultValue>,
 }
 
@@ -250,10 +278,14 @@ struct VisibleVaultDocument {
 enum VisibleVaultValue {
     PlainText {
         enc_base64: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nonce_base64: Option<String>,
     },
     FileContent {
         path: PathBuf,
         enc_base64: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nonce_base64: Option<String>,
         #[serde(default = "default_visible_vault_file_mode")]
         mode: u32,
         #[serde(default)]
@@ -273,7 +305,7 @@ fn parse_visible_vault_payload(input: &[u8]) -> Result<VisibleVaultDocument, Err
             )
         })?;
 
-    if visible.version != VISIBLE_VAULT_VERSION {
+    if !is_supported_visible_vault_version(visible.version) {
         return Err(Error::InvalidBundle(format!(
             "unsupported visible vault version {} for bundle export",
             visible.version
@@ -287,6 +319,7 @@ fn split_visible_vault_entries(
     visible: VisibleVaultDocument,
 ) -> Result<
     (
+        Option<VisibleVaultCryptoMetadata>,
         BTreeMap<String, BundledEnvEntry>,
         BTreeMap<String, BundledFileEntry>,
     ),
@@ -297,17 +330,27 @@ fn split_visible_vault_entries(
 
     for (key, value) in visible.entries {
         match value {
-            VisibleVaultValue::PlainText { enc_base64 } => {
+            VisibleVaultValue::PlainText {
+                enc_base64,
+                nonce_base64,
+            } => {
                 if files.contains_key(&key) {
                     return Err(Error::InvalidBundle(format!(
                         "duplicate bundled key '{key}'"
                     )));
                 }
-                env.insert(key, BundledEnvEntry { enc_base64 });
+                env.insert(
+                    key,
+                    BundledEnvEntry {
+                        enc_base64,
+                        nonce_base64,
+                    },
+                );
             }
             VisibleVaultValue::FileContent {
                 path,
                 enc_base64,
+                nonce_base64,
                 mode,
                 cleanup,
             } => {
@@ -321,6 +364,7 @@ fn split_visible_vault_entries(
                     BundledFileEntry {
                         path,
                         enc_base64,
+                        nonce_base64,
                         mode: format!("{mode:04o}"),
                         cleanup,
                     },
@@ -329,7 +373,7 @@ fn split_visible_vault_entries(
         }
     }
 
-    Ok((env, files))
+    Ok((visible.crypto, env, files))
 }
 
 fn bundle_profile_resources(
@@ -444,12 +488,28 @@ fn resolve_profile_workdir(profile: &Profile, profile_path: &Path) -> PathBuf {
 
 fn serialize_visible_vault_payload_from_bundle(bundle: &BundleDocument) -> Result<Vec<u8>, Error> {
     let mut entries = BTreeMap::new();
+    let has_nonce = bundle
+        .env
+        .values()
+        .any(|value| value.nonce_base64.is_some())
+        || bundle
+            .files
+            .values()
+            .any(|value| value.nonce_base64.is_some());
+
+    if has_nonce && bundle.visible_vault_crypto.is_none() {
+        return Err(Error::InvalidBundle(
+            "bundle contains AES-GCM visible vault entries but is missing visible_vault_crypto"
+                .to_string(),
+        ));
+    }
 
     for (key, value) in &bundle.env {
         entries.insert(
             key.clone(),
             VisibleVaultValue::PlainText {
                 enc_base64: value.enc_base64.clone(),
+                nonce_base64: value.nonce_base64.clone(),
             },
         );
     }
@@ -465,6 +525,7 @@ fn serialize_visible_vault_payload_from_bundle(bundle: &BundleDocument) -> Resul
             VisibleVaultValue::FileContent {
                 path: value.path.clone(),
                 enc_base64: value.enc_base64.clone(),
+                nonce_base64: value.nonce_base64.clone(),
                 mode: parse_file_mode(&value.mode)?,
                 cleanup: value.cleanup,
             },
@@ -472,11 +533,20 @@ fn serialize_visible_vault_payload_from_bundle(bundle: &BundleDocument) -> Resul
     }
 
     serde_yaml::to_string(&VisibleVaultDocument {
-        version: default_visible_vault_version(),
+        version: if bundle.visible_vault_crypto.is_some() {
+            default_visible_vault_version()
+        } else {
+            2
+        },
+        crypto: bundle.visible_vault_crypto.clone(),
         entries,
     })
     .map(|yaml| yaml.into_bytes())
     .map_err(|err| Error::BundleSerialize(err.to_string()))
+}
+
+fn is_supported_visible_vault_version(version: u8) -> bool {
+    matches!(version, 2 | 3)
 }
 
 #[cfg(test)]
