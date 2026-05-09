@@ -6,6 +6,8 @@ use crate::profile::DEFAULT_PROFILE_DIR;
 #[derive(Debug, Parser)]
 #[command(name = "runvault", version, about = "Encrypted env launcher")]
 pub struct Cli {
+    #[arg(global = true, short = 'p', long = "profile", value_name = "PATH")]
+    pub profile: Option<PathBuf>,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -210,53 +212,84 @@ pub struct PingAddArgs {
 }
 
 impl CacheClearArgs {
-    pub fn profile_or_default(&self) -> PathBuf {
-        self.profile
-            .clone()
+    pub fn profile_or_default(&self, global_profile: Option<&PathBuf>) -> PathBuf {
+        global_profile
+            .cloned()
+            .or_else(|| self.profile.clone())
             .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR))
     }
 }
 
 impl CreateProfileArgs {
-    pub fn profile_or_default(&self) -> PathBuf {
-        self.profile
-            .clone()
+    pub fn profile_or_default(&self, global_profile: Option<&PathBuf>) -> PathBuf {
+        global_profile
+            .cloned()
+            .or_else(|| self.profile.clone())
             .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR))
     }
 }
 
 impl BundleArgs {
-    pub fn resolve(&self) -> (PathBuf, PathBuf) {
+    pub fn resolve(&self, global_profile: Option<&PathBuf>) -> (PathBuf, PathBuf) {
         match self.targets.as_slice() {
+            [output] if global_profile.is_some() => {
+                (global_profile.cloned().unwrap(), output.clone())
+            }
             [output] => (PathBuf::from(DEFAULT_PROFILE_DIR), output.clone()),
-            [profile, output] => (profile.clone(), output.clone()),
+            [profile, output] => (
+                global_profile.cloned().unwrap_or_else(|| profile.clone()),
+                output.clone(),
+            ),
             _ => unreachable!("clap enforces bundle target arity"),
         }
     }
 }
 
 impl SetArgs {
-    pub fn resolve(&self) -> (PathBuf, String) {
+    pub fn resolve(&self, global_profile: Option<&PathBuf>) -> (PathBuf, String) {
         match self.targets.as_slice() {
-            [key] => (PathBuf::from(DEFAULT_PROFILE_DIR), key.clone()),
-            [profile, key] => (PathBuf::from(profile), key.clone()),
+            [key] => (
+                global_profile
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR)),
+                key.clone(),
+            ),
+            [profile, key] => (
+                global_profile
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from(profile)),
+                key.clone(),
+            ),
             _ => unreachable!("clap enforces set target arity"),
         }
     }
 }
 
 impl JwtArgs {
-    pub fn resolve(&self) -> (PathBuf, String) {
+    pub fn resolve(&self, global_profile: Option<&PathBuf>) -> (PathBuf, String) {
         match self.targets.as_slice() {
-            [key] => (PathBuf::from(DEFAULT_PROFILE_DIR), key.clone()),
-            [profile, key] => (PathBuf::from(profile), key.clone()),
+            [key] => (
+                global_profile
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR)),
+                key.clone(),
+            ),
+            [profile, key] => (
+                global_profile
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from(profile)),
+                key.clone(),
+            ),
             _ => unreachable!("clap enforces jwt target arity"),
         }
     }
 }
 
 impl ImportEnvArgs {
-    pub fn resolve(&self) -> (PathBuf, Vec<PathBuf>) {
+    pub fn resolve(&self, global_profile: Option<&PathBuf>) -> (PathBuf, Vec<PathBuf>) {
+        if let Some(profile) = global_profile {
+            return (profile.clone(), self.targets.clone());
+        }
         match self.targets.as_slice() {
             [input] => (PathBuf::from(DEFAULT_PROFILE_DIR), vec![input.clone()]),
             [first, rest @ ..] if looks_like_profile_path(first) => (first.clone(), rest.to_vec()),
@@ -266,7 +299,10 @@ impl ImportEnvArgs {
 }
 
 impl ImportResourcesArgs {
-    pub fn resolve(&self) -> (PathBuf, Vec<PathBuf>) {
+    pub fn resolve(&self, global_profile: Option<&PathBuf>) -> (PathBuf, Vec<PathBuf>) {
+        if let Some(profile) = global_profile {
+            return (profile.clone(), self.targets.clone());
+        }
         match self.targets.as_slice() {
             [input] => (PathBuf::from(DEFAULT_PROFILE_DIR), vec![input.clone()]),
             [first, rest @ ..] if looks_like_profile_path(first) => (first.clone(), rest.to_vec()),
@@ -276,7 +312,10 @@ impl ImportResourcesArgs {
 }
 
 impl ImportFilesArgs {
-    pub fn resolve(&self) -> (PathBuf, Vec<PathBuf>) {
+    pub fn resolve(&self, global_profile: Option<&PathBuf>) -> (PathBuf, Vec<PathBuf>) {
+        if let Some(profile) = global_profile {
+            return (profile.clone(), self.targets.clone());
+        }
         match self.targets.as_slice() {
             [input] => (PathBuf::from(DEFAULT_PROFILE_DIR), vec![input.clone()]),
             [first, rest @ ..] if looks_like_profile_path(first) => (first.clone(), rest.to_vec()),
@@ -286,39 +325,62 @@ impl ImportFilesArgs {
 }
 
 impl DeleteArgs {
-    pub fn resolve(&self) -> (PathBuf, String) {
+    pub fn resolve(&self, global_profile: Option<&PathBuf>) -> (PathBuf, String) {
         match self.targets.as_slice() {
-            [key] => (PathBuf::from(DEFAULT_PROFILE_DIR), key.clone()),
-            [profile, key] => (PathBuf::from(profile), key.clone()),
+            [key] => (
+                global_profile
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR)),
+                key.clone(),
+            ),
+            [profile, key] => (
+                global_profile
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from(profile)),
+                key.clone(),
+            ),
             _ => unreachable!("clap enforces delete target arity"),
         }
     }
 }
 
 impl RevealArgs {
-    pub fn resolve(&self) -> (PathBuf, String) {
+    pub fn resolve(&self, global_profile: Option<&PathBuf>) -> (PathBuf, String) {
         match self.targets.as_slice() {
-            [key] => (PathBuf::from(DEFAULT_PROFILE_DIR), key.clone()),
-            [profile, key] => (PathBuf::from(profile), key.clone()),
+            [key] => (
+                global_profile
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR)),
+                key.clone(),
+            ),
+            [profile, key] => (
+                global_profile
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from(profile)),
+                key.clone(),
+            ),
             _ => unreachable!("clap enforces reveal target arity"),
         }
     }
 }
 
 impl ProfileArgs {
-    pub fn profile_or_default(&self) -> PathBuf {
-        self.profile
-            .clone()
+    pub fn profile_or_default(&self, global_profile: Option<&PathBuf>) -> PathBuf {
+        global_profile
+            .cloned()
+            .or_else(|| self.profile.clone())
             .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR))
     }
 }
 
 impl CmdSetArgs {
-    pub fn resolve(&self) -> (PathBuf, Vec<String>) {
+    pub fn resolve(&self, global_profile: Option<&PathBuf>) -> (PathBuf, Vec<String>) {
         match self.parts.as_slice() {
             [cmd @ ..] if !cmd.is_empty() => {
                 let first = PathBuf::from(&cmd[0]);
-                let (profile, mut command) = if cmd.len() >= 2 && looks_like_profile_path(&first) {
+                let (profile, mut command) = if let Some(profile) = global_profile {
+                    (profile.clone(), cmd.to_vec())
+                } else if cmd.len() >= 2 && looks_like_profile_path(&first) {
                     (first, cmd[1..].to_vec())
                 } else {
                     (PathBuf::from(DEFAULT_PROFILE_DIR), cmd.to_vec())
@@ -334,22 +396,31 @@ impl CmdSetArgs {
 }
 
 impl PingCommand {
-    pub fn profile_or_default(&self) -> PathBuf {
-        self.profile
-            .clone()
+    pub fn profile_or_default(&self, global_profile: Option<&PathBuf>) -> PathBuf {
+        global_profile
+            .cloned()
+            .or_else(|| self.profile.clone())
             .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR))
     }
 }
 
 impl PingAddArgs {
-    pub fn resolve(&self) -> (PathBuf, String, String) {
+    pub fn resolve(&self, global_profile: Option<&PathBuf>) -> (PathBuf, String, String) {
         match self.targets.as_slice() {
             [name, url] => (
-                PathBuf::from(DEFAULT_PROFILE_DIR),
+                global_profile
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR)),
                 name.clone(),
                 url.clone(),
             ),
-            [profile, name, url] => (PathBuf::from(profile), name.clone(), url.clone()),
+            [profile, name, url] => (
+                global_profile
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from(profile)),
+                name.clone(),
+                url.clone(),
+            ),
             _ => unreachable!("clap enforces ping add target arity"),
         }
     }
@@ -386,7 +457,7 @@ mod tests {
             panic!("expected import env subcommand");
         };
 
-        let (profile, inputs) = args.resolve();
+        let (profile, inputs) = args.resolve(None);
         assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
         assert_eq!(
             inputs,
@@ -402,7 +473,7 @@ mod tests {
             panic!("expected jwt command");
         };
 
-        let (profile, key) = args.resolve();
+        let (profile, key) = args.resolve(None);
         assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
         assert_eq!(key, "TEMPO_INGEST_TOKEN");
     }
@@ -425,7 +496,7 @@ mod tests {
             panic!("expected ping add subcommand");
         };
 
-        let (profile, name, url) = add.resolve();
+        let (profile, name, url) = add.resolve(None);
         assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
         assert_eq!(name, "api");
         assert_eq!(url, "http://127.0.0.1:8080/health");
@@ -444,7 +515,7 @@ mod tests {
             panic!("expected cmd command");
         };
         let CmdSubcommand::Set(set) = args.command;
-        let (profile, cmd) = set.resolve();
+        let (profile, cmd) = set.resolve(None);
         assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
         assert_eq!(cmd, vec!["docker", "compose", "up", "-d"]);
     }
@@ -477,9 +548,62 @@ mod tests {
         };
         let CmdSubcommand::Set(set) = args.command;
 
-        let (profile, cmd) = set.resolve();
+        let (profile, cmd) = set.resolve(None);
         assert_eq!(profile, profile_dir);
         assert_eq!(cmd, vec!["docker", "compose", "up", "-d"]);
+    }
+
+    #[test]
+    fn global_profile_flag_applies_to_import_env_without_profile_path_heuristics() {
+        let cli = Cli::try_parse_from([
+            "runvault",
+            "--profile",
+            "deployments/ovh/services",
+            "import",
+            "env",
+            ".env",
+            ".env.local",
+        ])
+        .unwrap();
+
+        let global_profile = cli.profile.as_ref();
+        let Command::Import(args) = cli.command else {
+            panic!("expected import command");
+        };
+        let ImportSubcommand::Env(args) = args.command else {
+            panic!("expected import env subcommand");
+        };
+
+        let (profile, inputs) = args.resolve(global_profile);
+        assert_eq!(profile, PathBuf::from("deployments/ovh/services"));
+        assert_eq!(
+            inputs,
+            vec![PathBuf::from(".env"), PathBuf::from(".env.local")]
+        );
+    }
+
+    #[test]
+    fn global_profile_flag_overrides_legacy_positional_profile_for_set() {
+        let cli = Cli::try_parse_from([
+            "runvault",
+            "--profile",
+            "deployments/ovh/services",
+            "set",
+            "ignored-profile",
+            "DATABASE_URL",
+            "--value",
+            "postgres://db",
+        ])
+        .unwrap();
+
+        let global_profile = cli.profile.as_ref();
+        let Command::Set(args) = cli.command else {
+            panic!("expected set command");
+        };
+
+        let (profile, key) = args.resolve(global_profile);
+        assert_eq!(profile, PathBuf::from("deployments/ovh/services"));
+        assert_eq!(key, "DATABASE_URL");
     }
 
     #[test]
@@ -490,7 +614,7 @@ mod tests {
             panic!("expected bundle command");
         };
 
-        let (profile, output) = args.resolve();
+        let (profile, output) = args.resolve(None);
         assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
         assert_eq!(output, PathBuf::from("profile.bundle.yaml"));
         assert!(!args.force);
@@ -535,7 +659,7 @@ mod tests {
             panic!("expected import env subcommand");
         };
 
-        let (profile, inputs) = args.resolve();
+        let (profile, inputs) = args.resolve(None);
         assert_eq!(profile, profile_dir);
         assert_eq!(
             inputs,
@@ -561,7 +685,7 @@ mod tests {
             panic!("expected import resources subcommand");
         };
 
-        let (profile, inputs) = args.resolve();
+        let (profile, inputs) = args.resolve(None);
         assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
         assert_eq!(
             inputs,
@@ -581,7 +705,7 @@ mod tests {
             panic!("expected import-files command");
         };
 
-        let (profile, inputs) = args.resolve();
+        let (profile, inputs) = args.resolve(None);
         assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
         assert_eq!(
             inputs,

@@ -8,7 +8,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    crypto::{decrypt_env, encrypt_env},
+    crypto::{EncryptedPayload, VaultCipher, VaultCryptoConfig, decrypt_env},
     envfile::{parse_env_bytes, validate_env_key},
     error::Error,
     profile::{FileCleanup, Profile},
@@ -29,12 +29,15 @@ pub enum VaultValue {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VaultDocument {
     entries: BTreeMap<String, VaultValue>,
+    visible_crypto: Option<VisibleVaultCryptoMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct VisibleVaultDocument {
     #[serde(default = "default_visible_vault_version")]
     version: u8,
+    #[serde(default)]
+    crypto: Option<VisibleVaultCryptoMetadata>,
     #[serde(default)]
     entries: BTreeMap<String, VisibleVaultValue>,
 }
@@ -44,15 +47,28 @@ struct VisibleVaultDocument {
 pub enum VisibleVaultValue {
     PlainText {
         enc_base64: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nonce_base64: Option<String>,
     },
     FileContent {
         path: PathBuf,
         enc_base64: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nonce_base64: Option<String>,
         #[serde(default = "default_file_mode")]
         mode: u32,
         #[serde(default)]
         cleanup: StoredFileCleanup,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct VisibleVaultCryptoMetadata {
+    #[serde(default = "default_visible_vault_cipher")]
+    cipher: String,
+    salt_base64: String,
+    #[serde(default = "default_visible_vault_pbkdf2_rounds")]
+    pbkdf2_rounds: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -80,11 +96,19 @@ enum LegacyStoredVaultValue {
 }
 
 fn default_visible_vault_version() -> u8 {
-    2
+    3
 }
 
 fn default_legacy_vault_version() -> u8 {
     1
+}
+
+fn default_visible_vault_cipher() -> String {
+    "aes_256_gcm".to_string()
+}
+
+fn default_visible_vault_pbkdf2_rounds() -> u32 {
+    crate::crypto::DEFAULT_VAULT_PBKDF2_ROUNDS
 }
 
 fn default_file_mode() -> u32 {
@@ -113,6 +137,15 @@ impl From<FileCleanup> for StoredFileCleanup {
         match value {
             FileCleanup::OnExit => StoredFileCleanup::OnExit,
             FileCleanup::Keep => StoredFileCleanup::Keep,
+        }
+    }
+}
+
+impl StoredFileCleanup {
+    fn as_str(self) -> &'static str {
+        match self {
+            StoredFileCleanup::OnExit => "on_exit",
+            StoredFileCleanup::Keep => "keep",
         }
     }
 }
@@ -165,6 +198,10 @@ impl VaultDocument {
 
     pub fn into_entries(self) -> BTreeMap<String, VaultValue> {
         self.entries
+    }
+
+    fn visible_crypto(&self) -> Option<&VisibleVaultCryptoMetadata> {
+        self.visible_crypto.as_ref()
     }
 }
 
@@ -246,6 +283,7 @@ fn parse_legacy_vault_bytes(input: &[u8]) -> Result<VaultDocument, Error> {
                     .into_iter()
                     .map(|(key, value)| (key, VaultValue::PlainText(value)))
                     .collect(),
+                visible_crypto: None,
             })
         }
     }
@@ -262,25 +300,76 @@ fn serialize_visible_vault_bytes(
     vault: &VaultDocument,
     password: SecretString,
 ) -> Result<Vec<u8>, Error> {
+    let needs_aead = vault
+        .entries
+        .values()
+        .any(|value| !matches!(value, VaultValue::SealedVisible(_)));
+    let crypto = if needs_aead {
+        Some(
+            vault
+                .visible_crypto()
+                .cloned()
+                .unwrap_or_else(|| visible_vault_crypto_metadata(&VaultCryptoConfig::generate())),
+        )
+    } else {
+        vault.visible_crypto().cloned()
+    };
+    let cipher = if needs_aead {
+        Some(VaultCipher::derive(
+            &password,
+            &visible_vault_crypto_config(crypto.as_ref().ok_or_else(|| {
+                Error::VaultFormat("missing visible vault crypto config".to_string())
+            })?)?,
+        )?)
+    } else {
+        None
+    };
+
     let entries = vault
         .entries
         .iter()
         .map(|(key, value)| {
             let stored_value = match value {
-                VaultValue::PlainText(value) => VisibleVaultValue::PlainText {
-                    enc_base64: STANDARD.encode(encrypt_env(value.as_bytes(), password.clone())?),
-                },
+                VaultValue::PlainText(value) => {
+                    let encrypted = cipher
+                        .as_ref()
+                        .ok_or_else(|| {
+                            Error::VaultFormat(
+                                "missing AES-256-GCM cipher for visible vault entry".to_string(),
+                            )
+                        })?
+                        .encrypt(value.as_bytes(), plain_text_aad(key).as_bytes())?;
+                    VisibleVaultValue::PlainText {
+                        enc_base64: STANDARD.encode(encrypted.ciphertext),
+                        nonce_base64: Some(STANDARD.encode(encrypted.nonce)),
+                    }
+                }
                 VaultValue::FileContent {
                     path,
                     content,
                     mode,
                     cleanup,
-                } => VisibleVaultValue::FileContent {
-                    path: path.clone(),
-                    enc_base64: STANDARD.encode(encrypt_env(content, password.clone())?),
-                    mode: *mode,
-                    cleanup: (*cleanup).into(),
-                },
+                } => {
+                    let cleanup: StoredFileCleanup = (*cleanup).into();
+                    let encrypted = cipher
+                        .as_ref()
+                        .ok_or_else(|| {
+                            Error::VaultFormat(
+                                "missing AES-256-GCM cipher for visible vault entry".to_string(),
+                            )
+                        })?
+                        .encrypt(
+                            content,
+                            file_content_aad(key, path, *mode, cleanup).as_bytes(),
+                        )?;
+                    VisibleVaultValue::FileContent {
+                        path: path.clone(),
+                        enc_base64: STANDARD.encode(encrypted.ciphertext),
+                        nonce_base64: Some(STANDARD.encode(encrypted.nonce)),
+                        mode: *mode,
+                        cleanup,
+                    }
+                }
                 VaultValue::SealedVisible(value) => value.clone(),
             };
             Ok((key.clone(), stored_value))
@@ -288,7 +377,12 @@ fn serialize_visible_vault_bytes(
         .collect::<Result<BTreeMap<_, _>, Error>>()?;
 
     let stored = VisibleVaultDocument {
-        version: default_visible_vault_version(),
+        version: if crypto.is_some() {
+            default_visible_vault_version()
+        } else {
+            2
+        },
+        crypto,
         entries,
     };
 
@@ -301,64 +395,87 @@ fn from_visible_vault(
     stored: VisibleVaultDocument,
     password: SecretString,
 ) -> Result<VaultDocument, Error> {
-    if stored.version != default_visible_vault_version() {
+    if !is_supported_visible_vault_version(stored.version) {
         return Err(Error::VaultFormat(format!(
             "unsupported visible vault version {}",
             stored.version
         )));
     }
 
+    let cipher = visible_vault_cipher(stored.crypto.as_ref(), &password)?;
     let mut entries = BTreeMap::new();
     for (key, value) in stored.entries {
         validate_key(&key)?;
-        let decoded = decrypt_visible_value(&key, value, password.clone())?;
+        let decoded = decrypt_visible_value(&key, value, password.clone(), cipher.as_ref())?;
         entries.insert(key, decoded);
     }
 
-    Ok(VaultDocument { entries })
+    Ok(VaultDocument {
+        entries,
+        visible_crypto: stored.crypto,
+    })
 }
 
 fn from_visible_vault_for_update(
     stored: VisibleVaultDocument,
     password: SecretString,
 ) -> Result<VaultDocument, Error> {
-    if stored.version != default_visible_vault_version() {
+    if !is_supported_visible_vault_version(stored.version) {
         return Err(Error::VaultFormat(format!(
             "unsupported visible vault version {}",
             stored.version
         )));
     }
 
+    let cipher = visible_vault_cipher(stored.crypto.as_ref(), &password)?;
     let mut entries = BTreeMap::new();
     let mut validated_password = stored.entries.is_empty();
 
     for (key, value) in stored.entries {
         validate_key(&key)?;
         if !validated_password {
-            validate_visible_entry_password(&key, &value, password.clone())?;
+            validate_visible_entry_password(&key, &value, password.clone(), cipher.as_ref())?;
             validated_password = true;
         }
         entries.insert(key, VaultValue::SealedVisible(value));
     }
 
-    Ok(VaultDocument { entries })
+    Ok(VaultDocument {
+        entries,
+        visible_crypto: stored.crypto,
+    })
 }
 
 fn decrypt_visible_value(
     key: &str,
     value: VisibleVaultValue,
     password: SecretString,
+    cipher: Option<&VaultCipher>,
 ) -> Result<VaultValue, Error> {
     match value {
-        VisibleVaultValue::PlainText { enc_base64 } => {
-            let ciphertext =
-                STANDARD
-                    .decode(enc_base64)
-                    .map_err(|source| Error::EntryCiphertextDecode {
-                        key: key.to_string(),
-                        source,
-                    })?;
-            let plaintext = decrypt_env(&ciphertext, password)?;
+        VisibleVaultValue::PlainText {
+            enc_base64,
+            nonce_base64,
+        } => {
+            let plaintext = if let Some(nonce_base64) = nonce_base64 {
+                let payload = encrypted_payload_from_fields(key, enc_base64, &nonce_base64)?;
+                cipher
+                    .ok_or_else(|| {
+                        Error::VaultFormat(format!(
+                            "key '{key}' requires visible vault crypto metadata"
+                        ))
+                    })?
+                    .decrypt(&payload, plain_text_aad(key).as_bytes())?
+            } else {
+                let ciphertext =
+                    STANDARD
+                        .decode(enc_base64)
+                        .map_err(|source| Error::EntryCiphertextDecode {
+                            key: key.to_string(),
+                            source,
+                        })?;
+                decrypt_env(&ciphertext, password)?
+            };
             let value = String::from_utf8(plaintext.to_vec())
                 .map_err(|_| Error::VaultFormat(format!("key '{key}' is not valid utf-8")))?;
             Ok(VaultValue::PlainText(value))
@@ -366,17 +483,33 @@ fn decrypt_visible_value(
         VisibleVaultValue::FileContent {
             path,
             enc_base64,
+            nonce_base64,
             mode,
             cleanup,
         } => {
-            let ciphertext =
-                STANDARD
-                    .decode(enc_base64)
-                    .map_err(|source| Error::EntryCiphertextDecode {
-                        key: key.to_string(),
-                        source,
-                    })?;
-            let content = decrypt_env(&ciphertext, password)?.to_vec();
+            let content = if let Some(nonce_base64) = nonce_base64 {
+                let payload = encrypted_payload_from_fields(key, enc_base64, &nonce_base64)?;
+                cipher
+                    .ok_or_else(|| {
+                        Error::VaultFormat(format!(
+                            "key '{key}' requires visible vault crypto metadata"
+                        ))
+                    })?
+                    .decrypt(
+                        &payload,
+                        file_content_aad(key, &path, mode, cleanup).as_bytes(),
+                    )?
+                    .to_vec()
+            } else {
+                let ciphertext =
+                    STANDARD
+                        .decode(enc_base64)
+                        .map_err(|source| Error::EntryCiphertextDecode {
+                            key: key.to_string(),
+                            source,
+                        })?;
+                decrypt_env(&ciphertext, password)?.to_vec()
+            };
             Ok(VaultValue::FileContent {
                 path,
                 content,
@@ -391,28 +524,65 @@ fn validate_visible_entry_password(
     key: &str,
     value: &VisibleVaultValue,
     password: SecretString,
+    cipher: Option<&VaultCipher>,
 ) -> Result<(), Error> {
     match value {
-        VisibleVaultValue::PlainText { enc_base64 } => {
-            let ciphertext =
-                STANDARD
-                    .decode(enc_base64)
-                    .map_err(|source| Error::EntryCiphertextDecode {
-                        key: key.to_string(),
-                        source,
-                    })?;
-            let _ = decrypt_env(&ciphertext, password)?;
-        }
-        VisibleVaultValue::FileContent { enc_base64, .. } => {
-            let ciphertext =
-                STANDARD
-                    .decode(enc_base64)
-                    .map_err(|source| Error::EntryCiphertextDecode {
-                        key: key.to_string(),
-                        source,
-                    })?;
-            let _ = decrypt_env(&ciphertext, password)?;
-        }
+        VisibleVaultValue::PlainText {
+            enc_base64,
+            nonce_base64,
+        } => match nonce_base64 {
+            Some(nonce_base64) => {
+                let payload = encrypted_payload_from_fields(key, enc_base64.clone(), nonce_base64)?;
+                let _ = cipher
+                    .ok_or_else(|| {
+                        Error::VaultFormat(format!(
+                            "key '{key}' requires visible vault crypto metadata"
+                        ))
+                    })?
+                    .decrypt(&payload, plain_text_aad(key).as_bytes())?;
+            }
+            None => {
+                let ciphertext =
+                    STANDARD
+                        .decode(enc_base64)
+                        .map_err(|source| Error::EntryCiphertextDecode {
+                            key: key.to_string(),
+                            source,
+                        })?;
+                let _ = decrypt_env(&ciphertext, password)?;
+            }
+        },
+        VisibleVaultValue::FileContent {
+            path,
+            enc_base64,
+            nonce_base64,
+            mode,
+            cleanup,
+        } => match nonce_base64 {
+            Some(nonce_base64) => {
+                let payload = encrypted_payload_from_fields(key, enc_base64.clone(), nonce_base64)?;
+                let _ = cipher
+                    .ok_or_else(|| {
+                        Error::VaultFormat(format!(
+                            "key '{key}' requires visible vault crypto metadata"
+                        ))
+                    })?
+                    .decrypt(
+                        &payload,
+                        file_content_aad(key, path, *mode, *cleanup).as_bytes(),
+                    )?;
+            }
+            None => {
+                let ciphertext =
+                    STANDARD
+                        .decode(enc_base64)
+                        .map_err(|source| Error::EntryCiphertextDecode {
+                            key: key.to_string(),
+                            source,
+                        })?;
+                let _ = decrypt_env(&ciphertext, password)?;
+            }
+        },
     }
     Ok(())
 }
@@ -450,7 +620,10 @@ fn from_legacy_vault(stored: LegacyStoredVaultDocument) -> Result<VaultDocument,
         entries.insert(key, decoded);
     }
 
-    Ok(VaultDocument { entries })
+    Ok(VaultDocument {
+        entries,
+        visible_crypto: None,
+    })
 }
 
 fn validate_key(key: &str) -> Result<(), Error> {
@@ -459,6 +632,83 @@ fn validate_key(key: &str) -> Result<(), Error> {
     } else {
         Err(Error::InvalidConfigKey(key.to_string()))
     }
+}
+
+fn is_supported_visible_vault_version(version: u8) -> bool {
+    matches!(version, 2 | 3)
+}
+
+fn visible_vault_crypto_metadata(config: &VaultCryptoConfig) -> VisibleVaultCryptoMetadata {
+    VisibleVaultCryptoMetadata {
+        cipher: default_visible_vault_cipher(),
+        salt_base64: STANDARD.encode(config.salt),
+        pbkdf2_rounds: config.pbkdf2_rounds,
+    }
+}
+
+fn visible_vault_crypto_config(
+    metadata: &VisibleVaultCryptoMetadata,
+) -> Result<VaultCryptoConfig, Error> {
+    if metadata.cipher != default_visible_vault_cipher() {
+        return Err(Error::VaultFormat(format!(
+            "unsupported visible vault cipher {}",
+            metadata.cipher
+        )));
+    }
+
+    let salt = STANDARD
+        .decode(&metadata.salt_base64)
+        .map_err(|err| Error::VaultFormat(format!("invalid visible vault salt: {err}")))?;
+    let salt: [u8; crate::crypto::VAULT_KDF_SALT_LEN] = salt.try_into().map_err(|_| {
+        Error::VaultFormat("visible vault salt must be exactly 16 bytes".to_string())
+    })?;
+
+    Ok(VaultCryptoConfig {
+        salt,
+        pbkdf2_rounds: metadata.pbkdf2_rounds,
+    })
+}
+
+fn visible_vault_cipher(
+    metadata: Option<&VisibleVaultCryptoMetadata>,
+    password: &SecretString,
+) -> Result<Option<VaultCipher>, Error> {
+    metadata
+        .map(|metadata| VaultCipher::derive(password, &visible_vault_crypto_config(metadata)?))
+        .transpose()
+}
+
+fn encrypted_payload_from_fields(
+    key: &str,
+    enc_base64: String,
+    nonce_base64: &str,
+) -> Result<EncryptedPayload, Error> {
+    let ciphertext =
+        STANDARD
+            .decode(enc_base64)
+            .map_err(|source| Error::EntryCiphertextDecode {
+                key: key.to_string(),
+                source,
+            })?;
+    let nonce = STANDARD
+        .decode(nonce_base64)
+        .map_err(|err| Error::VaultFormat(format!("invalid nonce for key '{key}': {err}")))?;
+    let nonce: [u8; crate::crypto::VAULT_NONCE_LEN] = nonce.try_into().map_err(|_| {
+        Error::VaultFormat(format!("nonce for key '{key}' must be exactly 12 bytes"))
+    })?;
+    Ok(EncryptedPayload { nonce, ciphertext })
+}
+
+fn plain_text_aad(key: &str) -> String {
+    format!("kind=plain_text\nkey={key}\n")
+}
+
+fn file_content_aad(key: &str, path: &Path, mode: u32, cleanup: StoredFileCleanup) -> String {
+    format!(
+        "kind=file_content\nkey={key}\npath={}\nmode={mode:04o}\ncleanup={}\n",
+        path.to_string_lossy(),
+        cleanup.as_str(),
+    )
 }
 
 #[cfg(test)]
@@ -526,7 +776,10 @@ run:
         assert!(env_path.exists());
 
         let visible = std::fs::read_to_string(&env_path).unwrap();
-        assert!(visible.contains("version: 2"));
+        assert!(visible.contains("version: 3"));
+        assert!(visible.contains("crypto:"));
+        assert!(visible.contains("salt_base64:"));
+        assert!(visible.contains("nonce_base64:"));
         assert!(visible.contains("API_KEY:"));
         assert!(visible.contains("GOOGLE_APPLICATION_CREDENTIALS:"));
         assert!(!visible.contains("value: test"));
@@ -653,10 +906,12 @@ entries:
         .unwrap();
         let visible = VisibleVaultDocument {
             version: 2,
+            crypto: None,
             entries: BTreeMap::from([(
                 "SECRET".to_string(),
                 VisibleVaultValue::PlainText {
                     enc_base64: STANDARD.encode(ciphertext),
+                    nonce_base64: None,
                 },
             )]),
         };
@@ -708,17 +963,20 @@ run:
             STANDARD.encode(encrypt_env(b"keep-me", password.clone()).unwrap());
         let visible = VisibleVaultDocument {
             version: 2,
+            crypto: None,
             entries: BTreeMap::from([
                 (
                     "SECRET".to_string(),
                     VisibleVaultValue::PlainText {
                         enc_base64: original_secret_ciphertext.clone(),
+                        nonce_base64: None,
                     },
                 ),
                 (
                     "CONFIG".to_string(),
                     VisibleVaultValue::PlainText {
                         enc_base64: STANDARD.encode(encrypt_env(b"old", password.clone()).unwrap()),
+                        nonce_base64: None,
                     },
                 ),
             ]),
@@ -741,8 +999,11 @@ run:
             saved.entries.get("SECRET"),
             Some(&VisibleVaultValue::PlainText {
                 enc_base64: original_secret_ciphertext,
+                nonce_base64: None,
             })
         );
+        assert_eq!(saved.version, 3);
+        assert!(saved.crypto.is_some());
 
         let loaded = load_vault_with_password(&profile, &profile_path, password).unwrap();
         assert_eq!(
@@ -753,6 +1014,50 @@ run:
             loaded.entries().get("CONFIG"),
             Some(&VaultValue::PlainText("new".to_string()))
         );
+    }
+
+    #[test]
+    fn visible_aes_entries_authenticate_file_metadata() {
+        let dir = tempdir().unwrap();
+        let profile_path = dir.path().join("profile.yaml");
+        let env_path = dir.path().join("secret.env.enc");
+        std::fs::write(
+            &profile_path,
+            r#"
+name: local
+env_file: secret.env.enc
+run:
+  cmd: ["/bin/sh", "-c", "exit 0"]
+"#,
+        )
+        .unwrap();
+        let profile = Profile::from_path(&profile_path).unwrap();
+        let password = SecretString::from("test-password".to_string());
+
+        let mut vault = VaultDocument::default();
+        vault
+            .set_file_content(
+                "TLS_KEY",
+                PathBuf::from(".runvault/tls/key.pem"),
+                b"top-secret".to_vec(),
+                0o600,
+                FileCleanup::Keep,
+            )
+            .unwrap();
+        save_vault_with_password(&profile, &profile_path, &vault, password.clone()).unwrap();
+
+        let mut saved: VisibleVaultDocument =
+            serde_yaml::from_str(&std::fs::read_to_string(&env_path).unwrap()).unwrap();
+        match saved.entries.get_mut("TLS_KEY").unwrap() {
+            VisibleVaultValue::FileContent { path, .. } => {
+                *path = PathBuf::from(".runvault/tls/other.pem");
+            }
+            _ => panic!("expected file-backed visible value"),
+        }
+        std::fs::write(&env_path, serde_yaml::to_string(&saved).unwrap()).unwrap();
+
+        let err = load_vault_with_password(&profile, &profile_path, password).unwrap_err();
+        assert!(err.to_string().contains("decryption failed"));
     }
 
     #[test]

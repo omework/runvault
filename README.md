@@ -20,22 +20,36 @@ If you omit the profile path, `runvault` now defaults to:
 ./.vault
 ```
 
+You can also target a profile explicitly with the global `--profile` / `-p` flag:
+
+```bash
+runvault --profile deployments/ovh/services run
+runvault -p deployments/ovh/services import env .env.local
+runvault -p deployments/ovh/services cmd set -- docker compose up -d
+```
+
+The flag takes precedence over legacy positional profile arguments.
+
 ## Commands
 
 ```bash
 runvault create-profile
 runvault create-profile deployments/ovh/services
+runvault --profile deployments/ovh/services run
 runvault bundle services.bundle.yaml --version v1.0.0 --description "OVH services profile"
 runvault run services.bundle.yaml
 runvault encrypt .env
 runvault jwt JWT_SIGNING_SECRET --issuer runvault --audience tempo --subject worker --ttl 15m
 runvault set DATABASE_URL --value postgres://...
 runvault set deployments/ovh/services DATABASE_URL --value postgres://...
-runvault import .env.example .env.local --prefix PROD_
-runvault import deployments/ovh/services .env.example .env.local --prefix PROD_
+runvault --profile deployments/ovh/services set DATABASE_URL --value postgres://...
+runvault import env .env.example .env.local --prefix PROD_
+runvault import env deployments/ovh/services .env.example .env.local --prefix PROD_
+runvault --profile deployments/ovh/services import env .env.example .env.local --prefix PROD_
 runvault import-files files-spec.yaml tls-files.yaml
 runvault import-files deployments/ovh/services files-spec.yaml tls-files.yaml
 runvault cmd set -- docker compose up -d
+runvault --profile deployments/ovh/services cmd set -- docker compose up -d
 runvault ping add api http://127.0.0.1:8080/health
 runvault set deployments/ovh/services TLS_KEY \
   --value \"secret-key\" \

@@ -37,11 +37,12 @@ async fn main() {
 }
 
 async fn run() -> Result<(), Error> {
-    let cli = Cli::parse();
-    match cli.command {
+    let Cli { profile, command } = Cli::parse();
+    let global_profile = profile.as_ref();
+    match command {
         Command::Cmd(args) => match args.command {
             CmdSubcommand::Set(set) => {
-                let (profile_input, cmd) = set.resolve();
+                let (profile_input, cmd) = set.resolve(global_profile);
                 ensure_default_profile_exists(&profile_input)?;
                 let profile_path = resolve_profile_path(&profile_input);
                 let mut profile = Profile::from_path(&profile_path)?;
@@ -51,7 +52,7 @@ async fn run() -> Result<(), Error> {
         },
         Command::CreateProfile(args) => {
             let created = create_profile(
-                &args.profile_or_default(),
+                &args.profile_or_default(global_profile),
                 &CreateProfileOptions {
                     name: args.name,
                     env_file: args.env_file,
@@ -61,7 +62,7 @@ async fn run() -> Result<(), Error> {
             Ok(())
         }
         Command::Bundle(args) => {
-            let (profile_input, output_path) = args.resolve();
+            let (profile_input, output_path) = args.resolve(global_profile);
             ensure_default_profile_exists(&profile_input)?;
             export_bundle(
                 &profile_input,
@@ -77,6 +78,8 @@ async fn run() -> Result<(), Error> {
             CacheSubcommand::Clear(args) => {
                 if let Some(profile) = args.profile {
                     clear_password(&resolve_profile_path(&profile))
+                } else if let Some(profile) = global_profile {
+                    clear_password(&resolve_profile_path(profile))
                 } else {
                     clear_all_passwords()
                 }
@@ -99,7 +102,7 @@ async fn run() -> Result<(), Error> {
             Ok(())
         }
         Command::Jwt(args) => {
-            let (profile_input, key) = args.resolve();
+            let (profile_input, key) = args.resolve(global_profile);
             ensure_default_profile_exists(&profile_input)?;
             let profile_path = resolve_profile_path(&profile_input);
             let mut profile = Profile::from_path(&profile_path)?;
@@ -155,7 +158,7 @@ async fn run() -> Result<(), Error> {
             Ok(())
         }
         Command::Set(args) => {
-            let (profile_input, key) = args.resolve();
+            let (profile_input, key) = args.resolve(global_profile);
             ensure_default_profile_exists(&profile_input)?;
             let profile_path = resolve_profile_path(&profile_input);
             let mut profile = Profile::from_path(&profile_path)?;
@@ -244,7 +247,7 @@ async fn run() -> Result<(), Error> {
         }
         Command::Import(args) => match args.command {
             ImportSubcommand::Env(args) => {
-                let (profile_input, input_paths) = args.resolve();
+                let (profile_input, input_paths) = args.resolve(global_profile);
                 ensure_default_profile_exists(&profile_input)?;
                 let profile_path = resolve_profile_path(&profile_input);
                 let mut profile = Profile::from_path(&profile_path)?;
@@ -308,7 +311,7 @@ async fn run() -> Result<(), Error> {
                 save_vault_with_password(&profile, &profile_path, &vault, password)
             }
             ImportSubcommand::Resources(args) => {
-                let (profile_input, input_paths) = args.resolve();
+                let (profile_input, input_paths) = args.resolve(global_profile);
                 ensure_default_profile_exists(&profile_input)?;
                 let profile_path = resolve_profile_path(&profile_input);
                 let mut profile = Profile::from_path(&profile_path)?;
@@ -324,7 +327,7 @@ async fn run() -> Result<(), Error> {
             }
         },
         Command::ImportFiles(args) => {
-            let (profile_input, input_paths) = args.resolve();
+            let (profile_input, input_paths) = args.resolve(global_profile);
             ensure_default_profile_exists(&profile_input)?;
             let profile_path = resolve_profile_path(&profile_input);
             let mut profile = Profile::from_path(&profile_path)?;
@@ -351,7 +354,7 @@ async fn run() -> Result<(), Error> {
             save_vault_with_password(&profile, &profile_path, &vault, password)
         }
         Command::Delete(args) => {
-            let (profile_input, key) = args.resolve();
+            let (profile_input, key) = args.resolve(global_profile);
             ensure_default_profile_exists(&profile_input)?;
             let profile_path = resolve_profile_path(&profile_input);
             let mut profile = Profile::from_path(&profile_path)?;
@@ -363,7 +366,7 @@ async fn run() -> Result<(), Error> {
             save_vault_with_password(&profile, &profile_path, &vault, password)
         }
         Command::Reveal(args) => {
-            let (profile_input, key) = args.resolve();
+            let (profile_input, key) = args.resolve(global_profile);
             ensure_default_profile_exists(&profile_input)?;
             let profile_path = resolve_profile_path(&profile_input);
             let profile = Profile::from_path(&profile_path)?;
@@ -381,7 +384,7 @@ async fn run() -> Result<(), Error> {
             )
         }
         Command::Run(args) => {
-            let target = args.profile_or_default();
+            let target = args.profile_or_default(global_profile);
             if looks_like_profile_input(&target) {
                 run_profile(&target).await
             } else {
@@ -392,7 +395,7 @@ async fn run() -> Result<(), Error> {
         }
         Command::Ping(args) => match args.command {
             Some(runvault::cli::PingSubcommand::Add(add)) => {
-                let (profile_input, name, url) = add.resolve();
+                let (profile_input, name, url) = add.resolve(global_profile);
                 ensure_default_profile_exists(&profile_input)?;
                 let profile_path = resolve_profile_path(&profile_input);
                 let mut profile = Profile::from_path(&profile_path)?;
@@ -404,7 +407,7 @@ async fn run() -> Result<(), Error> {
                 });
                 save_profile_to_path(&profile_path, &profile)
             }
-            None => ping_profile(&args.profile_or_default()).await,
+            None => ping_profile(&args.profile_or_default(global_profile)).await,
         },
     }
 }
