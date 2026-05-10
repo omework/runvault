@@ -17,7 +17,9 @@ use crate::{
         FileCleanup, Profile, ensure_default_profile_exists, expand_user_home, parse_file_mode,
         resolve_profile_path,
     },
-    secure_store::{clear_password, load_password as load_secure_password, store_password},
+    secure_store::{
+        clear_password, load_password as load_secure_password, store_password_if_possible,
+    },
     vault::{VaultValue, load_vault_with_password},
 };
 
@@ -149,7 +151,7 @@ fn load_profile_env_prompt(
     if let Some(password) = load_secure_password(secure_store_key)? {
         match load_profile_env_with_password(profile, profile_path, password.clone()) {
             Ok(loaded) => {
-                store_password(secure_store_key, &password)?;
+                store_password_if_possible(secure_store_key, &password)?;
                 return Ok(loaded);
             }
             Err(Error::Decryption(_)) => {
@@ -161,7 +163,7 @@ fn load_profile_env_prompt(
 
     let password = prompt_password_once()?;
     let loaded = load_profile_env_with_password(profile, profile_path, password.clone())?;
-    store_password(secure_store_key, &password)?;
+    store_password_if_possible(secure_store_key, &password)?;
     Ok(loaded)
 }
 

@@ -76,6 +76,24 @@ pub fn store_password(profile_path: &Path, password: &SecretString) -> Result<()
     }
 }
 
+pub fn store_password_if_possible(
+    profile_path: &Path,
+    password: &SecretString,
+) -> Result<(), Error> {
+    match store_password(profile_path, password) {
+        Ok(()) => Ok(()),
+        Err(Error::SecureStore(message)) if is_noninteractive_keychain_error(&message) => {
+            eprintln!(
+                "warning: macOS Keychain rejected password caching for {} ({}); continuing without secure-store cache",
+                profile_path.display(),
+                message
+            );
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
+}
+
 pub fn clear_password(profile_path: &Path) -> Result<(), Error> {
     #[cfg(target_os = "macos")]
     {
@@ -130,6 +148,10 @@ fn store_key(profile_path: &Path) -> Result<String, Error> {
 
 fn normalize_path(path: &PathBuf) -> String {
     path.to_string_lossy().to_string()
+}
+
+fn is_noninteractive_keychain_error(message: &str) -> bool {
+    message.contains("User interaction is not allowed") || message.contains("exit status: 36")
 }
 
 #[cfg(test)]

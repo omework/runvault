@@ -16,7 +16,8 @@ use runvault::{
     },
     run::{ping_profile, run_profile, run_profile_with_secure_store_key},
     secure_store::{
-        clear_all_passwords, clear_password, load_password as load_secure_password, store_password,
+        clear_all_passwords, clear_password, load_password as load_secure_password,
+        store_password_if_possible,
     },
     vault::{
         VaultDocument, VaultValue, load_vault_for_update_with_password, load_vault_with_password,
@@ -582,7 +583,7 @@ fn load_vault_with_lazy_password(
     if let Some(password) = load_secure_password(profile_path)? {
         match load_vault_with_password(profile, profile_path, password.clone()) {
             Ok(vault) => {
-                store_password(profile_path, &password)?;
+                store_password_if_possible(profile_path, &password)?;
                 return Ok((vault, password));
             }
             Err(Error::Decryption(_)) => {
@@ -594,7 +595,7 @@ fn load_vault_with_lazy_password(
 
     let password = prompt_password_once()?;
     let vault = load_vault_with_password(profile, profile_path, password.clone())?;
-    store_password(profile_path, &password)?;
+    store_password_if_possible(profile_path, &password)?;
     Ok((vault, password))
 }
 
@@ -605,7 +606,7 @@ fn load_vault_with_lazy_password_for_update(
     if let Some(password) = load_secure_password(profile_path)? {
         match load_vault_for_update_with_password(profile, profile_path, password.clone()) {
             Ok(vault) => {
-                store_password(profile_path, &password)?;
+                store_password_if_possible(profile_path, &password)?;
                 return Ok((vault, password));
             }
             Err(Error::Decryption(_)) => {
@@ -617,17 +618,17 @@ fn load_vault_with_lazy_password_for_update(
 
     let password = prompt_password_once()?;
     let vault = load_vault_for_update_with_password(profile, profile_path, password.clone())?;
-    store_password(profile_path, &password)?;
+    store_password_if_possible(profile_path, &password)?;
     Ok((vault, password))
 }
 
 fn password_for_new_vault(profile_path: &PathBuf) -> Result<age::secrecy::SecretString, Error> {
     if let Some(password) = load_secure_password(profile_path)? {
-        store_password(profile_path, &password)?;
+        store_password_if_possible(profile_path, &password)?;
         return Ok(password);
     }
     let password = prompt_password_confirm()?;
-    store_password(profile_path, &password)?;
+    store_password_if_possible(profile_path, &password)?;
     Ok(password)
 }
 
