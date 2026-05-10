@@ -288,6 +288,41 @@ fn write_runtime_file(
     context: Option<RuntimeWriteContext<'_>>,
 ) -> Result<MountedFile, Error> {
     if path.exists() {
+        let metadata = fs::metadata(path).map_err(|source| {
+            runtime_materialization_error(
+                context,
+                path,
+                "inspect existing runtime file".to_string(),
+                path.to_path_buf(),
+                source,
+            )
+        })?;
+        if !metadata.is_file() {
+            return Err(Error::RuntimeFilePathExists(path.to_path_buf()));
+        }
+
+        let existing = fs::read(path).map_err(|source| {
+            runtime_materialization_error(
+                context,
+                path,
+                "read existing runtime file".to_string(),
+                path.to_path_buf(),
+                source,
+            )
+        })?;
+        if existing == content {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
+            }
+            return Ok(MountedFile {
+                path: path.to_path_buf(),
+                created_dirs: Vec::new(),
+                cleanup,
+            });
+        }
+
         return Err(Error::RuntimeFilePathExists(path.to_path_buf()));
     }
 
@@ -745,6 +780,58 @@ run:
         assert!(runtime_secret.exists());
         cleanup_mounted_files(loaded.mounted_files);
         assert!(runtime_secret.exists());
+    }
+
+    #[test]
+    fn materialize_loaded_env_reuses_existing_runtime_file_with_identical_content() {
+        let dir = tempdir().unwrap();
+        let runtime_secret = dir.path().join("pki").join("root.chain.pem");
+        std::fs::create_dir_all(runtime_secret.parent().unwrap()).unwrap();
+        std::fs::write(&runtime_secret, "root-ca").unwrap();
+        let profile = test_profile(dir.path().to_path_buf());
+
+        let mut values = BTreeMap::new();
+        values.insert(
+            "POSTGRES_SERVER_CA_CRT".to_string(),
+            VaultValue::FileContent {
+                path: PathBuf::from("./pki/root.chain.pem"),
+                content: b"root-ca".to_vec(),
+                mode: 0o644,
+                cleanup: FileCleanup::Keep,
+            },
+        );
+
+        let loaded = materialize_loaded_env(dir.path(), &profile, values).unwrap();
+        assert_eq!(std::fs::read_to_string(&runtime_secret).unwrap(), "root-ca");
+        cleanup_mounted_files(loaded.mounted_files);
+        assert!(runtime_secret.exists());
+    }
+
+    #[test]
+    fn materialize_loaded_env_rejects_existing_runtime_file_with_different_content() {
+        let dir = tempdir().unwrap();
+        let runtime_secret = dir.path().join("pki").join("root.chain.pem");
+        std::fs::create_dir_all(runtime_secret.parent().unwrap()).unwrap();
+        std::fs::write(&runtime_secret, "old-root-ca").unwrap();
+        let profile = test_profile(dir.path().to_path_buf());
+
+        let mut values = BTreeMap::new();
+        values.insert(
+            "POSTGRES_SERVER_CA_CRT".to_string(),
+            VaultValue::FileContent {
+                path: PathBuf::from("./pki/root.chain.pem"),
+                content: b"new-root-ca".to_vec(),
+                mode: 0o644,
+                cleanup: FileCleanup::Keep,
+            },
+        );
+
+        let err = materialize_loaded_env(dir.path(), &profile, values).unwrap_err();
+        assert!(matches!(err, Error::RuntimeFilePathExists(_)));
+        assert_eq!(
+            std::fs::read_to_string(&runtime_secret).unwrap(),
+            "old-root-ca"
+        );
     }
 
     #[test]
