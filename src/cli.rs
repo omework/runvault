@@ -190,8 +190,20 @@ pub struct ImportEnvArgs {
 
 #[derive(Debug, Args)]
 pub struct ImportResourcesArgs {
-    #[arg(value_name = "PROFILE_OR_INPUT", num_args = 1..)]
+    #[arg(value_name = "PROFILE_OR_INPUT_OR_SRC", num_args = 0..)]
     pub targets: Vec<PathBuf>,
+    #[arg(long, value_name = "PATH")]
+    pub src: Option<PathBuf>,
+    #[arg(long, value_name = "KEY")]
+    pub key: Option<String>,
+    #[arg(long = "to-file", value_name = "PATH")]
+    pub to_file: Option<PathBuf>,
+    #[arg(long, value_name = "MODE", requires = "to_file")]
+    pub mode: Option<String>,
+    #[arg(long, requires = "to_file", conflicts_with = "on_exit")]
+    pub keep: bool,
+    #[arg(long = "on-exit", requires = "to_file", conflicts_with = "keep")]
+    pub on_exit: bool,
 }
 
 #[derive(Debug, Args)]
@@ -345,6 +357,67 @@ impl ImportResourcesArgs {
             [input] => (PathBuf::from(DEFAULT_PROFILE_DIR), vec![input.clone()]),
             [first, rest @ ..] if looks_like_profile_path(first) => (first.clone(), rest.to_vec()),
             inputs => (PathBuf::from(DEFAULT_PROFILE_DIR), inputs.to_vec()),
+        }
+    }
+
+    pub fn uses_inline_spec(&self) -> bool {
+        self.src.is_some()
+            || self.to_file.is_some()
+            || self.mode.is_some()
+            || self.keep
+            || self.on_exit
+    }
+
+    pub fn resolve_inline(
+        &self,
+        global_profile: Option<&PathBuf>,
+    ) -> Result<(PathBuf, PathBuf), String> {
+        if self.to_file.is_none() {
+            return Err("--to-file is required when importing a single resource".to_string());
+        }
+
+        if let Some(src) = &self.src {
+            return match global_profile {
+                Some(profile) => {
+                    if self.targets.is_empty() {
+                        Ok((profile.clone(), src.clone()))
+                    } else {
+                        Err(
+                            "single resource import expects no positional arguments when -p/--profile and --src are both used"
+                                .to_string(),
+                        )
+                    }
+                }
+                None => match self.targets.as_slice() {
+                    [] => Ok((PathBuf::from(DEFAULT_PROFILE_DIR), src.clone())),
+                    [profile] if looks_like_profile_path(profile) => Ok((profile.clone(), src.clone())),
+                    _ => Err(
+                        "single resource import expects only an optional PROFILE when --src is used"
+                            .to_string(),
+                    ),
+                },
+            };
+        }
+
+        if let Some(profile) = global_profile {
+            return match self.targets.as_slice() {
+                [src] => Ok((profile.clone(), src.clone())),
+                _ => Err(
+                    "single resource import expects exactly one positional source path when -p/--profile is used"
+                        .to_string(),
+                ),
+            };
+        }
+
+        match self.targets.as_slice() {
+            [src] => Ok((PathBuf::from(DEFAULT_PROFILE_DIR), src.clone())),
+            [profile, src] if looks_like_profile_path(profile) => {
+                Ok((profile.clone(), src.clone()))
+            }
+            _ => Err(
+                "single resource import expects SOURCE_PATH plus optional PROFILE before it"
+                    .to_string(),
+            ),
         }
     }
 }
@@ -784,6 +857,62 @@ mod tests {
                 PathBuf::from("resources-b.yaml")
             ]
         );
+    }
+
+    #[test]
+    fn import_resources_accepts_direct_single_resource_form() {
+        let cli = Cli::try_parse_from([
+            "runvault",
+            "import",
+            "resources",
+            "docker-compose.yml",
+            "--to-file",
+            "./docker-compose.yml",
+            "--mode",
+            "0644",
+        ])
+        .unwrap();
+
+        let Command::Import(args) = cli.command else {
+            panic!("expected import command");
+        };
+        let ImportSubcommand::Resources(args) = args.command else {
+            panic!("expected import resources subcommand");
+        };
+
+        assert!(args.uses_inline_spec());
+        let (profile, src) = args.resolve_inline(None).unwrap();
+        assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
+        assert_eq!(src, PathBuf::from("docker-compose.yml"));
+        assert_eq!(args.to_file, Some(PathBuf::from("./docker-compose.yml")));
+        assert_eq!(args.mode.as_deref(), Some("0644"));
+    }
+
+    #[test]
+    fn import_resources_accepts_direct_form_with_explicit_profile_flag() {
+        let cli = Cli::try_parse_from([
+            "runvault",
+            "--profile",
+            "deployments/home/workers",
+            "import",
+            "resources",
+            "docker-compose.yml",
+            "--to-file",
+            "./docker-compose.yml",
+        ])
+        .unwrap();
+
+        let global_profile = cli.profile.as_ref();
+        let Command::Import(args) = cli.command else {
+            panic!("expected import command");
+        };
+        let ImportSubcommand::Resources(args) = args.command else {
+            panic!("expected import resources subcommand");
+        };
+
+        let (profile, src) = args.resolve_inline(global_profile).unwrap();
+        assert_eq!(profile, PathBuf::from("deployments/home/workers"));
+        assert_eq!(src, PathBuf::from("docker-compose.yml"));
     }
 
     #[test]

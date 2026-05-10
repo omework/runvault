@@ -471,6 +471,22 @@ Behavior:
 - when exporting a bundle, relative resource `source_path` values are looked up from the same effective workdir used by `run`, after resolving any relative workdir from the current process directory
 - when `workdir` is omitted, bundle export treats the current process directory as the lookup base for relative resource `source_path`
 
+You can also import a single resource directly without a YAML spec:
+
+```bash
+runvault -p deployments/home/workers import resources docker-compose.yml \
+  --to-file ./docker-compose.yml \
+  --mode 0644
+```
+
+Direct single-resource behavior:
+
+- the positional argument is the source file path
+- `--to-file` is required
+- `--mode` is optional and defaults to `0600`
+- `--keep` / `--on-exit` control cleanup the same way as YAML specs
+- `--key KEY` is optional; when omitted, `runvault` derives a stable resource key from `--to-file`
+
 ## Importing file-backed values from a YAML spec
 
 You can bulk-load file-backed values from a YAML file:

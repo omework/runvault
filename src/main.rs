@@ -361,19 +361,51 @@ async fn run() -> Result<(), Error> {
                 save_vault_with_password(&profile, &profile_path, &vault, password)
             }
             ImportSubcommand::Resources(args) => {
-                let (profile_input, input_paths) = args.resolve(global_profile);
-                ensure_default_profile_exists(&profile_input)?;
-                let profile_path = resolve_profile_path(&profile_input);
-                let mut profile = Profile::from_path(&profile_path)?;
+                if args.uses_inline_spec() {
+                    let (profile_input, src) = args
+                        .resolve_inline(global_profile)
+                        .map_err(Error::InvalidImportSpec)?;
+                    ensure_default_profile_exists(&profile_input)?;
+                    let profile_path = resolve_profile_path(&profile_input);
+                    let mut profile = Profile::from_path(&profile_path)?;
+                    let target_path = args
+                        .to_file
+                        .clone()
+                        .expect("inline resource to-file is required");
+                    let key = args
+                        .key
+                        .clone()
+                        .unwrap_or_else(|| infer_resource_key(&target_path));
+                    apply_resource_import_spec(
+                        &mut profile,
+                        &key,
+                        ResourceImportSpec {
+                            src,
+                            to_file: target_path,
+                            mode: args.mode.clone().unwrap_or_else(|| "0600".to_string()),
+                            cleanup: if args.on_exit {
+                                FileCleanup::OnExit
+                            } else {
+                                FileCleanup::Keep
+                            },
+                        },
+                    );
+                    save_profile_to_path(&profile_path, &profile)
+                } else {
+                    let (profile_input, input_paths) = args.resolve(global_profile);
+                    ensure_default_profile_exists(&profile_input)?;
+                    let profile_path = resolve_profile_path(&profile_input);
+                    let mut profile = Profile::from_path(&profile_path)?;
 
-                for input_path in input_paths {
-                    let document = load_resource_import_document(&input_path)?;
-                    for (key, spec) in document.resources {
-                        apply_resource_import_spec(&mut profile, &key, spec);
+                    for input_path in input_paths {
+                        let document = load_resource_import_document(&input_path)?;
+                        for (key, spec) in document.resources {
+                            apply_resource_import_spec(&mut profile, &key, spec);
+                        }
                     }
-                }
 
-                save_profile_to_path(&profile_path, &profile)
+                    save_profile_to_path(&profile_path, &profile)
+                }
             }
         },
         Command::ImportFiles(args) => {
@@ -509,6 +541,38 @@ fn apply_resource_import_spec(profile: &mut Profile, key: &str, spec: ResourceIm
             cleanup: spec.cleanup,
         },
     );
+}
+
+fn infer_resource_key(target_path: &Path) -> String {
+    let mut key = String::from("RESOURCE_");
+    let mut last_was_underscore = true;
+
+    for ch in target_path.to_string_lossy().chars() {
+        let mapped = if ch.is_ascii_alphanumeric() {
+            ch.to_ascii_uppercase()
+        } else {
+            '_'
+        };
+        if mapped == '_' {
+            if !last_was_underscore {
+                key.push(mapped);
+            }
+            last_was_underscore = true;
+        } else {
+            key.push(mapped);
+            last_was_underscore = false;
+        }
+    }
+
+    while key.ends_with('_') {
+        key.pop();
+    }
+
+    if key == "RESOURCE" || key == "RESOURCE_" {
+        "RESOURCE_FILE".to_string()
+    } else {
+        key
+    }
 }
 
 fn load_vault_with_lazy_password(
