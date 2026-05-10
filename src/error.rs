@@ -14,6 +14,17 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+    #[error(
+        "failed to materialize runtime {kind} '{name}' at {target_path} during {operation}: {source}"
+    )]
+    RuntimeMaterialization {
+        kind: String,
+        name: String,
+        target_path: PathBuf,
+        operation: String,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("refusing to overwrite existing path {0}")]
     AlreadyExists(PathBuf),
     #[error("failed to parse profile {path}: {source}")]

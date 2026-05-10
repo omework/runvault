@@ -48,6 +48,12 @@ struct MountedFile {
     cleanup: FileCleanup,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RuntimeWriteContext<'a> {
+    kind: &'a str,
+    name: &'a str,
+}
+
 pub async fn run_profile(profile_path: &Path) -> Result<(), Error> {
     run_profile_with_secure_store_key(profile_path, profile_path).await
 }
@@ -203,7 +209,16 @@ fn materialize_loaded_env(
                 } else {
                     workdir.join(&path)
                 };
-                let mount = write_runtime_file(&resolved_path, &content, mode, cleanup)?;
+                let mount = write_runtime_file(
+                    &resolved_path,
+                    &content,
+                    mode,
+                    cleanup,
+                    Some(RuntimeWriteContext {
+                        kind: "file-backed value",
+                        name: &key,
+                    }),
+                )?;
                 envs.insert(key, display_path);
                 mounted_files.push(mount);
             }
@@ -233,7 +248,7 @@ fn materialize_profile_resources(
     };
     let mut mounted_files = Vec::new();
 
-    for spec in profile.resources().values() {
+    for (key, spec) in profile.resources() {
         let source_path = expand_user_home(&spec.source_path);
         let resolved_source_path = if source_path.is_absolute() {
             source_path
@@ -254,6 +269,10 @@ fn materialize_profile_resources(
             &content,
             parse_file_mode(&spec.mode)?,
             spec.cleanup,
+            Some(RuntimeWriteContext {
+                kind: "resource",
+                name: key,
+            }),
         )?;
         mounted_files.push(mount);
     }
@@ -266,6 +285,7 @@ fn write_runtime_file(
     content: &[u8],
     mode: u32,
     cleanup: FileCleanup,
+    context: Option<RuntimeWriteContext<'_>>,
 ) -> Result<MountedFile, Error> {
     if path.exists() {
         return Err(Error::RuntimeFilePathExists(path.to_path_buf()));
@@ -283,17 +303,27 @@ fn write_runtime_file(
             current = dir.parent();
         }
         for dir in missing.iter().rev() {
-            fs::create_dir(dir).map_err(|source| Error::WriteFile {
-                path: dir.clone(),
-                source,
+            fs::create_dir(dir).map_err(|source| {
+                runtime_materialization_error(
+                    context,
+                    path,
+                    format!("create parent directory {}", dir.display()),
+                    dir.clone(),
+                    source,
+                )
             })?;
             created_dirs.push(dir.clone());
         }
     }
 
-    fs::write(path, content).map_err(|source| Error::WriteFile {
-        path: path.to_path_buf(),
-        source,
+    fs::write(path, content).map_err(|source| {
+        runtime_materialization_error(
+            context,
+            path,
+            "write file contents".to_string(),
+            path.to_path_buf(),
+            source,
+        )
     })?;
 
     #[cfg(unix)]
@@ -307,6 +337,26 @@ fn write_runtime_file(
         created_dirs,
         cleanup,
     })
+}
+
+fn runtime_materialization_error(
+    context: Option<RuntimeWriteContext<'_>>,
+    target_path: &Path,
+    operation: String,
+    path: PathBuf,
+    source: std::io::Error,
+) -> Error {
+    if let Some(context) = context {
+        Error::RuntimeMaterialization {
+            kind: context.kind.to_string(),
+            name: context.name.to_string(),
+            target_path: target_path.to_path_buf(),
+            operation,
+            source,
+        }
+    } else {
+        Error::WriteFile { path, source }
+    }
 }
 
 fn cleanup_mounted_files(mounted_files: Vec<MountedFile>) {
@@ -607,6 +657,31 @@ run:
         cleanup_mounted_files(loaded.mounted_files);
         assert!(!runtime_secret.exists());
         assert!(!runtime_secret.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn materialize_loaded_env_reports_key_and_target_path_on_runtime_write_failure() {
+        let dir = tempdir().unwrap();
+        let blocking_parent = dir.path().join("blocked");
+        std::fs::write(&blocking_parent, "not a directory").unwrap();
+        let profile = test_profile(dir.path().to_path_buf());
+
+        let mut values = BTreeMap::new();
+        values.insert(
+            "SERVICE_TLS_KEY".to_string(),
+            VaultValue::FileContent {
+                path: PathBuf::from("blocked/server.key"),
+                content: b"key".to_vec(),
+                mode: 0o600,
+                cleanup: FileCleanup::OnExit,
+            },
+        );
+
+        let err = materialize_loaded_env(dir.path(), &profile, values).unwrap_err();
+        let message = err.to_string();
+        assert!(matches!(err, Error::RuntimeMaterialization { .. }));
+        assert!(message.contains("file-backed value 'SERVICE_TLS_KEY'"));
+        assert!(message.contains("blocked/server.key"));
     }
 
     #[tokio::test]
