@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -141,6 +141,7 @@ pub fn export_bundle(
     if profile.implicit_workdir {
         profile.workdir = None;
     }
+    normalize_profile_bundle_paths(&mut profile);
 
     let visible_vault = parse_visible_vault_payload(&env_payload)?;
     let (visible_vault_crypto, env, files) = split_visible_vault_entries(visible_vault)?;
@@ -365,7 +366,7 @@ fn split_visible_vault_entries(
                 files.insert(
                     key,
                     BundledFileEntry {
-                        path,
+                        path: normalize_bundle_relative_path(&path),
                         enc_base64,
                         nonce_base64,
                         mode: format!("{mode:04o}"),
@@ -399,7 +400,7 @@ fn bundle_profile_resources(
         resources.insert(
             key.clone(),
             BundledResourceEntry {
-                target_path: spec.target_path.clone(),
+                target_path: normalize_bundle_relative_path(&spec.target_path),
                 content_base64: STANDARD.encode(content),
                 mode: spec.mode.clone(),
                 cleanup: spec.cleanup,
@@ -409,7 +410,7 @@ fn bundle_profile_resources(
             key.clone(),
             ResourceSpec {
                 source_path: bundled_resource_source_path(&key, &spec),
-                target_path: spec.target_path,
+                target_path: normalize_bundle_relative_path(&spec.target_path),
                 mode: spec.mode,
                 cleanup: spec.cleanup,
             },
@@ -430,6 +431,25 @@ fn bundled_resource_source_path(key: &str, spec: &ResourceSpec) -> PathBuf {
         .join("resources")
         .join(key)
         .join(file_name)
+}
+
+fn normalize_bundle_relative_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    match path.components().next() {
+        Some(Component::CurDir | Component::ParentDir) | None => path.to_path_buf(),
+        _ => PathBuf::from(".").join(path),
+    }
+}
+
+fn normalize_profile_bundle_paths(profile: &mut Profile) {
+    for spec in profile.files.values_mut() {
+        spec.target_path = normalize_bundle_relative_path(&spec.target_path);
+    }
+    for spec in profile.resources.values_mut() {
+        spec.target_path = normalize_bundle_relative_path(&spec.target_path);
+    }
 }
 
 fn materialize_bundle_resources(base_dir: &Path, bundle: &BundleDocument) -> Result<(), Error> {
@@ -583,7 +603,7 @@ env_file: env.sec
 resources:
   BUNDLED_DOCKER_COMPOSE_FILE:
     source_path: ./docker-compose.yml
-    target_path: ./docker-compose.yml
+    target_path: docker-compose.yml
     mode: "0644"
     cleanup: keep
 run:
@@ -600,7 +620,7 @@ run:
         vault
             .set_file_content(
                 "GOOGLE_APPLICATION_CREDENTIALS",
-                PathBuf::from(".runvault/gcp.json"),
+                PathBuf::from("account-keys/gcp.json"),
                 br#"{"project":"demo"}"#.to_vec(),
                 0o600,
                 StoredFileCleanup::Keep.into(),
@@ -633,6 +653,22 @@ run:
         assert!(bundle.env.contains_key("API_KEY"));
         assert!(bundle.files.contains_key("GOOGLE_APPLICATION_CREDENTIALS"));
         assert!(bundle.resources.contains_key("BUNDLED_DOCKER_COMPOSE_FILE"));
+        assert_eq!(
+            bundle
+                .files
+                .get("GOOGLE_APPLICATION_CREDENTIALS")
+                .unwrap()
+                .path,
+            PathBuf::from("./account-keys/gcp.json")
+        );
+        assert_eq!(
+            bundle
+                .resources
+                .get("BUNDLED_DOCKER_COMPOSE_FILE")
+                .unwrap()
+                .target_path,
+            PathBuf::from("./docker-compose.yml")
+        );
         assert_eq!(
             bundle
                 .files
