@@ -153,9 +153,6 @@ impl Profile {
             })?;
         profile.implicit_workdir = profile.workdir.is_none();
         profile.validate()?;
-        if profile.implicit_workdir {
-            profile.workdir = path.parent().map(Path::to_path_buf);
-        }
         Ok(profile)
     }
 
@@ -516,7 +513,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn loads_profile_and_defaults_workdir_to_parent() {
+    fn loads_profile_and_keeps_implicit_workdir_unset() {
         let dir = tempdir().unwrap();
         let profile_path = dir.path().join("local.yaml");
         std::fs::write(
@@ -532,7 +529,7 @@ run:
 
         let profile = Profile::from_path(&profile_path).unwrap();
         assert_eq!(profile.name, "local");
-        assert_eq!(profile.workdir.as_deref(), Some(dir.path()));
+        assert_eq!(profile.workdir, None);
         assert_eq!(
             profile.resolve_env_path(&profile_path),
             dir.path().join("secrets.env.enc")

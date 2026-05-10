@@ -138,6 +138,9 @@ pub fn export_bundle(
             })?;
         profile.env_file = file_name;
     }
+    if profile.implicit_workdir {
+        profile.workdir = None;
+    }
 
     let visible_vault = parse_visible_vault_payload(&env_payload)?;
     let (visible_vault_crypto, env, files) = split_visible_vault_entries(visible_vault)?;

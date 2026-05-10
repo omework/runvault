@@ -775,6 +775,46 @@ run:
         assert!(runtime_compose.exists());
     }
 
+    #[test]
+    fn implicit_workdir_materializes_runtime_targets_under_execution_dir() {
+        let dir = tempdir().unwrap();
+        let current = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let profile_dir = dir.path().join(".vault");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        let profile_path = profile_dir.join("runvault.yaml");
+        std::fs::write(
+            &profile_path,
+            r#"
+name: local
+env_file: env.sec
+run:
+  cmd: ["/bin/sh", "-c", "exit 0"]
+"#,
+        )
+        .unwrap();
+
+        let profile = Profile::from_path(&profile_path).unwrap();
+        let mut values = BTreeMap::new();
+        values.insert(
+            "CADDY_CONFIG_FILE".to_string(),
+            VaultValue::FileContent {
+                path: PathBuf::from("./caddy/Caddyfile"),
+                content: b"example".to_vec(),
+                mode: 0o644,
+                cleanup: FileCleanup::OnExit,
+            },
+        );
+
+        let loaded = materialize_loaded_env(&profile_path, &profile, values).unwrap();
+        assert!(dir.path().join("caddy/Caddyfile").exists());
+        assert!(!profile_dir.join("caddy/Caddyfile").exists());
+
+        cleanup_mounted_files(loaded.mounted_files);
+        std::env::set_current_dir(current).unwrap();
+    }
+
     #[tokio::test]
     async fn wait_for_pings_detects_early_child_exit() {
         let mut child = Command::new("/bin/sh")
