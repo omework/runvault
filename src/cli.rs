@@ -86,22 +86,20 @@ pub struct EncryptArgs {
 
 #[derive(Debug, Args)]
 pub struct JwtArgs {
-    #[arg(value_name = "PROFILE_OR_KEY", num_args = 1..=2)]
-    pub targets: Vec<String>,
+    #[arg(value_name = "PROFILE", num_args = 0..=1)]
+    pub targets: Vec<PathBuf>,
     #[arg(long = "signing-key", value_name = "KEY")]
     pub signing_key: Option<String>,
     #[arg(long)]
     pub issuer: Option<String>,
     #[arg(long)]
-    pub audience: Option<String>,
+    pub audience: String,
     #[arg(long)]
     pub subject: Option<String>,
     #[arg(long, default_value = "1h")]
     pub ttl: String,
     #[arg(long = "claim", value_name = "KEY=VALUE")]
     pub claims: Vec<String>,
-    #[arg(long = "file", alias = "output", value_name = "PATH")]
-    pub file: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -316,20 +314,12 @@ impl SetArgs {
 }
 
 impl JwtArgs {
-    pub fn resolve(&self, global_profile: Option<&PathBuf>) -> (PathBuf, String) {
+    pub fn resolve(&self, global_profile: Option<&PathBuf>) -> PathBuf {
         match self.targets.as_slice() {
-            [key] => (
-                global_profile
-                    .cloned()
-                    .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR)),
-                key.clone(),
-            ),
-            [profile, key] => (
-                global_profile
-                    .cloned()
-                    .unwrap_or_else(|| PathBuf::from(profile)),
-                key.clone(),
-            ),
+            [] => global_profile
+                .cloned()
+                .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR)),
+            [profile] => global_profile.cloned().unwrap_or_else(|| profile.clone()),
             _ => unreachable!("clap enforces jwt target arity"),
         }
     }
@@ -578,16 +568,35 @@ mod tests {
     }
 
     #[test]
-    fn jwt_defaults_to_dot_vault_for_output_key() {
-        let cli = Cli::try_parse_from(["runvault", "jwt", "TEMPO_INGEST_TOKEN"]).unwrap();
+    fn jwt_defaults_to_dot_vault_for_profile() {
+        let cli = Cli::try_parse_from(["runvault", "jwt", "--audience", "tempo"]).unwrap();
 
         let Command::Jwt(args) = cli.command else {
             panic!("expected jwt command");
         };
 
-        let (profile, key) = args.resolve(None);
+        let profile = args.resolve(None);
         assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
-        assert_eq!(key, "TEMPO_INGEST_TOKEN");
+        assert_eq!(args.audience, "tempo");
+    }
+
+    #[test]
+    fn jwt_accepts_explicit_profile() {
+        let cli = Cli::try_parse_from([
+            "runvault",
+            "jwt",
+            "deployments/ovh/services",
+            "--audience",
+            "tempo",
+        ])
+        .unwrap();
+
+        let Command::Jwt(args) = cli.command else {
+            panic!("expected jwt command");
+        };
+
+        let profile = args.resolve(None);
+        assert_eq!(profile, PathBuf::from("deployments/ovh/services"));
     }
 
     #[test]

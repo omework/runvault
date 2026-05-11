@@ -105,21 +105,16 @@ async fn run() -> Result<(), Error> {
             Ok(())
         }
         Command::Jwt(args) => {
-            let (profile_input, key) = args.resolve(global_profile);
+            let profile_input = args.resolve(global_profile);
             ensure_default_profile_exists(&profile_input)?;
             let profile_path = resolve_profile_path(&profile_input);
-            let mut profile = Profile::from_path(&profile_path)?;
-            let env_path = profile.resolve_env_path(&profile_path);
-            let (mut vault, password) = if env_path.exists() {
-                let (vault, password) = load_vault_with_lazy_password(&profile, &profile_path)?;
-                (vault, password)
-            } else {
-                (
-                    VaultDocument::default(),
-                    password_for_new_vault(&profile_path)?,
-                )
-            };
+            let profile = Profile::from_path(&profile_path)?;
             let signing_secret = if let Some(signing_key) = args.signing_key.as_ref() {
+                let env_path = profile.resolve_env_path(&profile_path);
+                if !env_path.exists() {
+                    return Err(Error::MissingConfigKey(signing_key.clone()));
+                }
+                let (vault, _) = load_vault_with_lazy_password(&profile, &profile_path)?;
                 match vault.entries().get(signing_key) {
                     Some(VaultValue::PlainText(value)) => value.clone(),
                     Some(VaultValue::FileContent { .. }) => {
@@ -139,25 +134,13 @@ async fn run() -> Result<(), Error> {
                 &signing_secret,
                 &JwtOptions {
                     issuer: args.issuer,
-                    audience: args.audience,
+                    audience: Some(args.audience.clone()),
                     subject: args.subject,
                     ttl_seconds: parse_ttl_seconds(&args.ttl)?,
                     claims: args.claims,
                 },
             )?;
-            vault.set_plain_text(&key, token.clone())?;
-            profile.remove_file_spec(&key);
-            save_profile_to_path(&profile_path, &profile)?;
-            save_vault_with_password(&profile, &profile_path, &vault, password)?;
-
-            if let Some(output_path) = args.file {
-                std::fs::write(&output_path, token).map_err(|source| Error::WriteFile {
-                    path: output_path,
-                    source,
-                })?;
-            } else {
-                println!("{}", token);
-            }
+            println!("{}", token);
             Ok(())
         }
         Command::Set(args) => {

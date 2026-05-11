@@ -39,7 +39,7 @@ runvault --profile deployments/ovh/services run
 runvault bundle services.bundle.yaml --version v1.0.0 --description "OVH services profile"
 runvault run services.bundle.yaml
 runvault encrypt .env
-runvault jwt JWT_SIGNING_SECRET --issuer runvault --audience tempo --subject worker --ttl 15m
+runvault jwt --issuer runvault --audience tempo --subject worker --ttl 15m
 runvault set DATABASE_URL --value postgres://...
 runvault set deployments/ovh/services DATABASE_URL --value postgres://...
 runvault --profile deployments/ovh/services set DATABASE_URL --value postgres://...
@@ -351,10 +351,10 @@ Defaults:
 
 ## Generating a JWT
 
-You can mint an HS256 JWT and store it as a plain-text value in the vault:
+You can mint an HS256 JWT and print it directly:
 
 ```bash
-runvault jwt CADDY_TEMPO_INGEST_TOKEN \
+runvault jwt \
   --issuer runvault \
   --audience tempo \
   --subject workers-otel \
@@ -364,14 +364,15 @@ runvault jwt CADDY_TEMPO_INGEST_TOKEN \
 Explicit profile also works:
 
 ```bash
-runvault jwt deployments/ovh/services/vault CADDY_TEMPO_INGEST_TOKEN --audience tempo
+runvault jwt deployments/ovh/services/vault --audience tempo
 ```
 
 Behavior:
 
-- the generated JWT is always stored back into the vault key you pass positionally
+- the generated JWT is always printed to stdout
 - by default `runvault` generates a fresh signing secret internally for the token
 - if you want deterministic signing, pass `--signing-key <KEY>` and that key must already exist in the vault as a plain-text value
+- `--audience` is required
 - `iat` and `exp` are always added automatically
 - `--ttl` accepts:
   - seconds, for example `900`
@@ -383,9 +384,6 @@ Behavior:
   - `iss`
   - `aud`
   - `sub`
-- by default the token is also printed to stdout
-- `--file <path>` writes the generated token to a file instead
-- `--output <path>` remains accepted as an alias of `--file`
 
 ## Importing an existing env file
 
