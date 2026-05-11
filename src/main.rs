@@ -2,7 +2,7 @@ use clap::Parser;
 use runvault::{
     bundle::{BundleExportOptions, export_bundle, load_bundle, materialize_bundle},
     cli::{CacheSubcommand, Cli, CmdSubcommand, Command, ImportSubcommand, PkiSubcommand},
-    crypto::encrypt_env,
+    crypto::{encrypt_file_payload, maybe_decrypt_file_payload},
     envfile::{apply_prefix, parse_env_bytes, parse_reference_value},
     error::Error,
     jwt::{JwtOptions, generate_hs256, generate_signing_secret, parse_ttl_seconds},
@@ -97,7 +97,7 @@ async fn run() -> Result<(), Error> {
                 .output
                 .unwrap_or_else(|| default_encrypted_path(&args.input));
             let password = prompt_password_confirm()?;
-            let encrypted = encrypt_env(&input, password)?;
+            let encrypted = encrypt_file_payload(&input, password)?;
             std::fs::write(&output_path, encrypted).map_err(|source| Error::WriteFile {
                 path: output_path,
                 source,
@@ -199,22 +199,14 @@ async fn run() -> Result<(), Error> {
                     );
                 }
                 (None, Some(source_path), None) => {
-                    let content =
-                        std::fs::read(&source_path).map_err(|source| Error::ReadFile {
-                            path: source_path.clone(),
-                            source,
-                        })?;
+                    let content = read_profile_source_bytes(&source_path, &password)?;
                     let value = String::from_utf8(content)
                         .map_err(|_| Error::FileSourceNotUtf8 { path: source_path })?;
                     vault.set_plain_text(&key, value)?;
                     profile.remove_file_spec(&key);
                 }
                 (None, Some(source_path), Some(runtime_path)) => {
-                    let content =
-                        std::fs::read(&source_path).map_err(|source| Error::ReadFile {
-                            path: source_path,
-                            source,
-                        })?;
+                    let content = read_profile_source_bytes(&source_path, &password)?;
                     vault.set_file_content(&key, runtime_path.clone(), content, mode, cleanup)?;
                     profile.upsert_file_spec(
                         &key,
@@ -339,7 +331,13 @@ async fn run() -> Result<(), Error> {
                                     .insert((reference_path.clone(), key.clone()), spec.clone());
                                 spec
                             };
-                            apply_file_import_spec(&mut profile, &mut vault, &key, spec)?;
+                            apply_file_import_spec(
+                                &mut profile,
+                                &mut vault,
+                                &key,
+                                spec,
+                                &password,
+                            )?;
                         } else {
                             vault.set_plain_text(&key, value)?;
                             profile.remove_file_spec(&key);
@@ -418,7 +416,7 @@ async fn run() -> Result<(), Error> {
             for input_path in input_paths {
                 let document = load_file_import_document(&input_path)?;
                 for (key, spec) in document.files {
-                    apply_file_import_spec(&mut profile, &mut vault, &key, spec)?;
+                    apply_file_import_spec(&mut profile, &mut vault, &key, spec, &password)?;
                 }
             }
 
@@ -495,11 +493,9 @@ fn apply_file_import_spec(
     vault: &mut VaultDocument,
     key: &str,
     spec: FileImportSpec,
+    password: &age::secrecy::SecretString,
 ) -> Result<(), Error> {
-    let content = std::fs::read(&spec.src).map_err(|source| Error::ReadFile {
-        path: spec.src.clone(),
-        source,
-    })?;
+    let content = read_profile_source_bytes(&spec.src, password)?;
     if let Some(target_path) = spec.to_file {
         let mode = parse_file_mode(&spec.mode)?;
         let cleanup = spec.cleanup.unwrap_or(FileCleanup::Keep);
@@ -519,6 +515,17 @@ fn apply_file_import_spec(
         profile.remove_file_spec(key);
     }
     Ok(())
+}
+
+fn read_profile_source_bytes(
+    path: &Path,
+    password: &age::secrecy::SecretString,
+) -> Result<Vec<u8>, Error> {
+    let content = std::fs::read(path).map_err(|source| Error::ReadFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(maybe_decrypt_file_payload(&content, password.clone())?.to_vec())
 }
 
 fn apply_resource_import_spec(profile: &mut Profile, key: &str, spec: ResourceImportSpec) {

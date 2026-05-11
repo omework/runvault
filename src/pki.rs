@@ -1,4 +1,4 @@
-use age::secrecy::SecretString;
+use age::secrecy::{ExposeSecret, SecretString};
 use openssl::{
     asn1::{Asn1Integer, Asn1Time},
     bn::{BigNum, MsbOption},
@@ -6,6 +6,7 @@ use openssl::{
     nid::Nid,
     pkey::{PKey, Private},
     rsa::Rsa,
+    symm::Cipher,
     x509::{
         X509, X509Builder, X509NameBuilder,
         extension::{
@@ -19,11 +20,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{
-    crypto::{decrypt_env, encrypt_env},
-    error::Error,
-    profile::Profile,
-};
+use crate::{crypto::maybe_decrypt_file_payload, error::Error, profile::Profile};
 
 const ROOT_KEY_BITS: u32 = 4096;
 const LEAF_KEY_BITS: u32 = 2048;
@@ -52,7 +49,7 @@ pub fn init_profile_pki(
     let profile = Profile::from_path(profile_path)?;
     let profile_dir = profile_dir(profile_path)?;
     let root_dir = profile_dir.join("pki").join("ca").join("root");
-    let root_key_path = root_dir.join("root.key.pem.sec");
+    let root_key_path = root_dir.join("root.key.pem");
     let root_cert_path = root_dir.join("root.crt.pem");
     let root_chain_path = root_dir.join("root.chain.pem");
 
@@ -99,29 +96,18 @@ pub fn issue_profile_certificate(
     validate_leaf_name(name)?;
     let profile_dir = profile_dir(profile_path)?;
     let root_dir = profile_dir.join("pki").join("ca").join("root");
-    let root_key_path = root_dir.join("root.key.pem.sec");
-    let legacy_root_key_path = root_dir.join("root.key.pem");
+    let root_key_path = root_dir.join("root.key.pem");
     let root_cert_path = root_dir.join("root.crt.pem");
 
-    let root_key = if root_key_path.exists() {
-        load_private_key_encrypted(&root_key_path, password.clone())?
-    } else {
-        load_private_key(&legacy_root_key_path)?
-    };
+    let root_key = load_private_key_with_password(&root_key_path, password.clone())?;
     let root_cert = load_certificate(&root_cert_path)?;
 
     let issued_dir = profile_dir.join("pki").join("issued").join(name);
     let leaf_key_path = issued_dir.join(format!("{name}.key.pem"));
-    let encrypted_leaf_key_path = issued_dir.join(format!("{name}.key.pem.sec"));
     let leaf_cert_path = issued_dir.join(format!("{name}.crt.pem"));
     let leaf_chain_path = issued_dir.join(format!("{name}.chain.pem"));
 
-    for path in [
-        &leaf_key_path,
-        &encrypted_leaf_key_path,
-        &leaf_cert_path,
-        &leaf_chain_path,
-    ] {
+    for path in [&leaf_key_path, &leaf_cert_path, &leaf_chain_path] {
         if path.exists() {
             return Err(Error::AlreadyExists(path.clone()));
         }
@@ -167,12 +153,8 @@ pub fn issue_profile_certificate(
         options.days,
     )?;
 
-    write_pem(
-        &leaf_key_path,
-        &key.private_key_to_pem_pkcs8().map_err(pki_error)?,
-    )?;
     write_encrypted_pem(
-        &encrypted_leaf_key_path,
+        &leaf_key_path,
         &key.private_key_to_pem_pkcs8().map_err(pki_error)?,
         password,
     )?;
@@ -344,20 +326,15 @@ fn generate_rsa_key(bits: u32) -> Result<PKey<Private>, Error> {
     PKey::from_rsa(rsa).map_err(pki_error)
 }
 
-fn load_private_key(path: &Path) -> Result<PKey<Private>, Error> {
-    let pem = std::fs::read(path).map_err(|source| Error::ReadFile {
+fn load_private_key_with_password(
+    path: &Path,
+    password: SecretString,
+) -> Result<PKey<Private>, Error> {
+    let bytes = std::fs::read(path).map_err(|source| Error::ReadFile {
         path: path.to_path_buf(),
         source,
     })?;
-    PKey::private_key_from_pem(&pem).map_err(pki_error)
-}
-
-fn load_private_key_encrypted(path: &Path, password: SecretString) -> Result<PKey<Private>, Error> {
-    let ciphertext = std::fs::read(path).map_err(|source| Error::ReadFile {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let pem = decrypt_env(&ciphertext, password)?;
+    let pem = maybe_decrypt_file_payload(&bytes, password)?;
     PKey::private_key_from_pem(&pem).map_err(pki_error)
 }
 
@@ -377,7 +354,13 @@ fn write_pem(path: &Path, contents: &[u8]) -> Result<(), Error> {
 }
 
 fn write_encrypted_pem(path: &Path, contents: &[u8], password: SecretString) -> Result<(), Error> {
-    let encrypted = encrypt_env(contents, password)?;
+    let key = PKey::private_key_from_pem(contents).map_err(pki_error)?;
+    let encrypted = key
+        .private_key_to_pem_pkcs8_passphrase(
+            Cipher::aes_256_cbc(),
+            password.expose_secret().as_bytes(),
+        )
+        .map_err(pki_error)?;
     std::fs::write(path, encrypted).map_err(|source| Error::WriteFile {
         path: path.to_path_buf(),
         source,
@@ -461,7 +444,8 @@ mod tests {
         )
         .unwrap();
 
-        assert!(root_dir.join("root.key.pem.sec").exists());
+        let root_key = std::fs::read_to_string(root_dir.join("root.key.pem")).unwrap();
+        assert!(root_key.contains("BEGIN ENCRYPTED PRIVATE KEY"));
         assert!(root_dir.join("root.crt.pem").exists());
         assert!(root_dir.join("root.chain.pem").exists());
     }
@@ -522,7 +506,6 @@ mod tests {
         .unwrap();
         assert!(leaf.verify(root.public_key().unwrap().as_ref()).unwrap());
         assert!(issued_dir.join("api.service.local.key.pem").exists());
-        assert!(issued_dir.join("api.service.local.key.pem.sec").exists());
         assert!(issued_dir.join("api.service.local.chain.pem").exists());
     }
 }

@@ -10,6 +10,7 @@ use tokio::{
 };
 
 use crate::{
+    crypto::maybe_decrypt_file_payload,
     error::Error,
     password::prompt_password_once,
     ping::{ping_target_once, ping_targets},
@@ -172,18 +173,20 @@ fn load_profile_env_with_password(
     profile_path: &Path,
     password: age::secrecy::SecretString,
 ) -> Result<LoadedProfileEnv, Error> {
-    let vault = load_vault_with_password(profile, profile_path, password)?;
-    materialize_loaded_env(profile_path, profile, vault.into_entries())
+    let vault = load_vault_with_password(profile, profile_path, password.clone())?;
+    materialize_loaded_env(profile_path, profile, vault.into_entries(), password)
 }
 
 fn materialize_loaded_env(
     profile_path: &Path,
     profile: &Profile,
     values: BTreeMap<String, VaultValue>,
+    password: age::secrecy::SecretString,
 ) -> Result<LoadedProfileEnv, Error> {
     let workdir = resolve_workdir(profile);
     let mut envs = BTreeMap::new();
-    let mut mounted_files = materialize_profile_resources(profile_path, profile, &workdir)?;
+    let mut mounted_files =
+        materialize_profile_resources(profile_path, profile, &workdir, &password)?;
 
     for (key, value) in values {
         match value {
@@ -242,6 +245,7 @@ fn materialize_profile_resources(
     profile_path: &Path,
     profile: &Profile,
     workdir: &Path,
+    password: &age::secrecy::SecretString,
 ) -> Result<Vec<MountedFile>, Error> {
     let profile_dir = if profile_path.is_dir() {
         profile_path
@@ -257,10 +261,11 @@ fn materialize_profile_resources(
         } else {
             profile_dir.join(source_path)
         };
-        let content = fs::read(&resolved_source_path).map_err(|source| Error::ReadFile {
+        let raw_content = fs::read(&resolved_source_path).map_err(|source| Error::ReadFile {
             path: resolved_source_path,
             source,
         })?;
+        let content = maybe_decrypt_file_payload(&raw_content, password.clone())?;
         let resolved_target_path = if spec.target_path.is_absolute() {
             spec.target_path.clone()
         } else {
@@ -478,7 +483,8 @@ mod tests {
         profile::{FileCleanup, FileSpec, PingTarget, Profile, ResourceSpec, RunConfig},
         vault::{VaultDocument, VaultValue, save_vault_with_password},
     };
-    use age::secrecy::SecretString;
+    use age::secrecy::{ExposeSecret, SecretString};
+    use openssl::{pkey::PKey, rsa::Rsa, symm::Cipher};
     use std::{
         collections::BTreeMap,
         io::{Read, Write},
@@ -508,6 +514,10 @@ mod tests {
             pings: vec![],
             implicit_workdir: false,
         }
+    }
+
+    fn test_password() -> SecretString {
+        SecretString::from("password".to_string())
     }
 
     #[test]
@@ -648,7 +658,7 @@ run:
             },
         );
 
-        let loaded = materialize_loaded_env(dir.path(), &profile, values).unwrap();
+        let loaded = materialize_loaded_env(dir.path(), &profile, values, test_password()).unwrap();
         assert!(runtime_secret.exists());
 
         run_profile_with_loaded_env(&profile, loaded).await.unwrap();
@@ -683,7 +693,7 @@ run:
             },
         );
 
-        let loaded = materialize_loaded_env(dir.path(), &profile, values).unwrap();
+        let loaded = materialize_loaded_env(dir.path(), &profile, values, test_password()).unwrap();
         assert!(runtime_secret.exists());
         assert_eq!(
             std::fs::read_to_string(&runtime_secret).unwrap(),
@@ -714,7 +724,8 @@ run:
             },
         );
 
-        let err = materialize_loaded_env(dir.path(), &profile, values).unwrap_err();
+        let err =
+            materialize_loaded_env(dir.path(), &profile, values, test_password()).unwrap_err();
         let message = err.to_string();
         assert!(matches!(err, Error::RuntimeMaterialization { .. }));
         assert!(message.contains("file-backed value 'SERVICE_TLS_KEY'"));
@@ -752,7 +763,7 @@ run:
             },
         );
 
-        let loaded = materialize_loaded_env(dir.path(), &profile, values).unwrap();
+        let loaded = materialize_loaded_env(dir.path(), &profile, values, test_password()).unwrap();
         assert!(runtime_secret.exists());
         run_profile_with_loaded_env(&profile, loaded).await.unwrap();
         assert_eq!(
@@ -778,7 +789,7 @@ run:
             },
         );
 
-        let loaded = materialize_loaded_env(dir.path(), &profile, values).unwrap();
+        let loaded = materialize_loaded_env(dir.path(), &profile, values, test_password()).unwrap();
         assert!(runtime_secret.exists());
         cleanup_mounted_files(loaded.mounted_files);
         assert!(runtime_secret.exists());
@@ -803,7 +814,7 @@ run:
             },
         );
 
-        let loaded = materialize_loaded_env(dir.path(), &profile, values).unwrap();
+        let loaded = materialize_loaded_env(dir.path(), &profile, values, test_password()).unwrap();
         assert_eq!(std::fs::read_to_string(&runtime_secret).unwrap(), "root-ca");
         cleanup_mounted_files(loaded.mounted_files);
         assert!(runtime_secret.exists());
@@ -828,7 +839,8 @@ run:
             },
         );
 
-        let err = materialize_loaded_env(dir.path(), &profile, values).unwrap_err();
+        let err =
+            materialize_loaded_env(dir.path(), &profile, values, test_password()).unwrap_err();
         assert!(matches!(err, Error::RuntimeFilePathExists(_)));
         assert_eq!(
             std::fs::read_to_string(&runtime_secret).unwrap(),
@@ -854,7 +866,8 @@ run:
             },
         );
 
-        let loaded = materialize_loaded_env(dir.path(), &profile, BTreeMap::new()).unwrap();
+        let loaded =
+            materialize_loaded_env(dir.path(), &profile, BTreeMap::new(), test_password()).unwrap();
         assert!(runtime_compose.exists());
         assert_eq!(
             std::fs::read_to_string(&runtime_compose).unwrap(),
@@ -862,6 +875,42 @@ run:
         );
         cleanup_mounted_files(loaded.mounted_files);
         assert!(runtime_compose.exists());
+    }
+
+    #[test]
+    fn materialize_loaded_env_decrypts_encrypted_profile_resources() {
+        let dir = tempdir().unwrap();
+        let resource_source = dir.path().join("server.key.pem");
+        let runtime_key = dir.path().join("runtime").join("server.key.pem");
+        let key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
+        let encrypted = key
+            .private_key_to_pem_pkcs8_passphrase(
+                Cipher::aes_256_cbc(),
+                test_password().expose_secret().as_bytes(),
+            )
+            .unwrap();
+        std::fs::write(&resource_source, encrypted).unwrap();
+
+        let mut profile = test_profile(dir.path().join("runtime"));
+        profile.resources.insert(
+            "SERVER_KEY".to_string(),
+            ResourceSpec {
+                source_path: PathBuf::from("./server.key.pem"),
+                target_path: PathBuf::from("./server.key.pem"),
+                mode: "0600".to_string(),
+                cleanup: FileCleanup::Keep,
+            },
+        );
+
+        let loaded =
+            materialize_loaded_env(dir.path(), &profile, BTreeMap::new(), test_password()).unwrap();
+        assert!(
+            std::fs::read_to_string(&runtime_key)
+                .unwrap()
+                .contains("BEGIN PRIVATE KEY")
+        );
+        cleanup_mounted_files(loaded.mounted_files);
+        assert!(runtime_key.exists());
     }
 
     #[test]
@@ -896,7 +945,8 @@ run:
             },
         );
 
-        let loaded = materialize_loaded_env(&profile_path, &profile, values).unwrap();
+        let loaded =
+            materialize_loaded_env(&profile_path, &profile, values, test_password()).unwrap();
         assert!(dir.path().join("caddy/Caddyfile").exists());
         assert!(!profile_dir.join("caddy/Caddyfile").exists());
 

@@ -80,16 +80,15 @@ It does not create `env.sec`; that file is created lazily by the first `set` or 
 
 ```text
 <profile-folder>/pki/
-  ca/root/root.key.pem.sec
+  ca/root/root.key.pem
   ca/root/root.crt.pem
   ca/root/root.chain.pem
   issued/<name>/<name>.key.pem
-  issued/<name>/<name>.key.pem.sec
   issued/<name>/<name>.crt.pem
   issued/<name>/<name>.chain.pem
 ```
 
-`runvault pki init` creates the profile root CA. `runvault pki issue` signs a leaf with that root. The root CA private key is stored encrypted as `root.key.pem.sec`, and issued leaves also get an encrypted sidecar copy as `<name>.key.pem.sec`. If you do not pass `--client` or `--server`, the issued cert gets both usages. If you issue a server cert without any `--dns` or `--ip` SANs, `runvault` uses the certificate name as the default DNS SAN.
+`runvault pki init` creates the profile root CA. `runvault pki issue` signs a leaf with that root. Private key files keep their normal `*.key.pem` names, and `runvault` stores them as standard passphrase-encrypted PKCS#8 PEM files so they can also be reused outside `runvault` with the same passphrase. If you do not pass `--client` or `--server`, the issued cert gets both usages. If you issue a server cert without any `--dns` or `--ip` SANs, `runvault` uses the certificate name as the default DNS SAN.
 
 ## Secure password reuse
 
