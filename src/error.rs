@@ -115,6 +115,8 @@ pub enum Error {
     Pki(String),
     #[error("bundle is invalid: {0}")]
     InvalidBundle(String),
+    #[error("registry error: {0}")]
+    Registry(String),
     #[error("command failed with status {0}")]
     CommandFailed(String),
 }

@@ -28,6 +28,7 @@ pub enum Command {
     Delete(DeleteArgs),
     Reveal(RevealArgs),
     Run(ProfileArgs),
+    Rollback(ProfileArgs),
     Ping(PingCommand),
 }
 
@@ -472,6 +473,10 @@ impl ProfileArgs {
             .cloned()
             .or_else(|| self.profile.clone())
             .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR))
+    }
+
+    pub fn explicit_profile(&self, global_profile: Option<&PathBuf>) -> Option<PathBuf> {
+        global_profile.cloned().or_else(|| self.profile.clone())
     }
 }
 

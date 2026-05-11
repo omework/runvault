@@ -186,8 +186,17 @@ pub fn materialize_bundle(bundle: &BundleDocument) -> Result<(TempDir, PathBuf),
         path: std::env::temp_dir(),
         source,
     })?;
-    let profile_path = dir.path().join(DEFAULT_PROFILE_FILE);
+    let profile_path = materialize_bundle_into(dir.path(), bundle)?;
+    Ok((dir, profile_path))
+}
 
+pub fn materialize_bundle_into(base_dir: &Path, bundle: &BundleDocument) -> Result<PathBuf, Error> {
+    validate_bundle(bundle)?;
+    fs::create_dir_all(base_dir).map_err(|source| Error::WriteFile {
+        path: base_dir.to_path_buf(),
+        source,
+    })?;
+    let profile_path = base_dir.join(DEFAULT_PROFILE_FILE);
     let profile = bundle.profile.clone();
     if profile.env_file.is_absolute() {
         return Err(Error::InvalidBundle(
@@ -208,8 +217,8 @@ pub fn materialize_bundle(bundle: &BundleDocument) -> Result<(TempDir, PathBuf),
         path: env_path,
         source,
     })?;
-    materialize_bundle_resources(dir.path(), bundle)?;
-    Ok((dir, profile_path))
+    materialize_bundle_resources(base_dir, bundle)?;
+    Ok(profile_path)
 }
 
 fn validate_bundle(bundle: &BundleDocument) -> Result<(), Error> {
@@ -239,12 +248,17 @@ fn validate_bundle(bundle: &BundleDocument) -> Result<(), Error> {
             "bundled profile env_file must be relative".to_string(),
         ));
     }
+    reject_relative_parent_components(&bundle.profile.env_file, "bundled profile env_file")?;
     if bundle.env.is_empty() && bundle.files.is_empty() && bundle.resources.is_empty() {
         return Err(Error::InvalidBundle(
             "bundle must contain env/files/resources payload".to_string(),
         ));
     }
     for (key, value) in &bundle.resources {
+        reject_relative_parent_components(
+            &value.target_path,
+            &format!("bundled resource '{}' target_path", key),
+        )?;
         if value.target_path.as_os_str().is_empty() {
             return Err(Error::InvalidBundle(format!(
                 "bundled resource '{}' target_path must not be empty",
@@ -260,6 +274,19 @@ fn validate_bundle(bundle: &BundleDocument) -> Result<(), Error> {
         })?;
     }
     let _ = bundle_env_payload_bytes(bundle)?;
+    for (key, value) in &bundle.files {
+        reject_relative_parent_components(&value.path, &format!("bundled file '{}' path", key))?;
+    }
+    for (key, spec) in bundle.profile.resources() {
+        reject_relative_parent_components(
+            &spec.source_path,
+            &format!("bundled resource '{}' source_path", key),
+        )?;
+        reject_relative_parent_components(
+            &spec.target_path,
+            &format!("bundled resource '{}' target_path", key),
+        )?;
+    }
     Ok(())
 }
 
@@ -494,6 +521,22 @@ fn materialize_bundle_resources(base_dir: &Path, bundle: &BundleDocument) -> Res
     Ok(())
 }
 
+fn reject_relative_parent_components(path: &Path, label: &str) -> Result<(), Error> {
+    if path.is_absolute() {
+        return Ok(());
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(Error::InvalidBundle(format!(
+            "{} must not contain '..' in a relative path",
+            label
+        )));
+    }
+    Ok(())
+}
+
 fn resolve_profile_workdir(profile: &Profile, profile_path: &Path) -> PathBuf {
     let current_dir = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
     if profile.implicit_workdir {
@@ -587,8 +630,6 @@ mod tests {
     #[test]
     fn exports_and_materializes_bundle() {
         let dir = tempdir().unwrap();
-        let current = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
 
         let profile_dir = dir.path().join(".vault");
         std::fs::create_dir_all(&profile_dir).unwrap();
@@ -597,9 +638,11 @@ mod tests {
         std::fs::write(dir.path().join("docker-compose.yml"), "services: {}\n").unwrap();
         std::fs::write(
             &profile_path,
-            r#"
+            format!(
+                r#"
 name: local
 env_file: env.sec
+workdir: {}
 resources:
   BUNDLED_DOCKER_COMPOSE_FILE:
     source_path: ./docker-compose.yml
@@ -609,6 +652,8 @@ resources:
 run:
   cmd: ["/bin/sh", "-c", "exit 0"]
 "#,
+                dir.path().display()
+            ),
         )
         .unwrap();
 
@@ -701,8 +746,6 @@ run:
                 .join(&resource.source_path)
                 .exists()
         );
-
-        std::env::set_current_dir(current).unwrap();
     }
 
     #[test]

@@ -1,6 +1,8 @@
 use clap::Parser;
 use runvault::{
-    bundle::{BundleExportOptions, export_bundle, load_bundle, materialize_bundle},
+    bundle::{
+        BundleDocument, BundleExportOptions, export_bundle, load_bundle, materialize_bundle_into,
+    },
     cli::{CacheSubcommand, Cli, CmdSubcommand, Command, ImportSubcommand, PkiSubcommand},
     crypto::{encrypt_file_payload, maybe_decrypt_file_payload},
     envfile::{apply_prefix, parse_env_bytes, parse_reference_value},
@@ -14,7 +16,12 @@ use runvault::{
         expand_user_home, load_file_import_document, load_resource_import_document,
         parse_file_mode, resolve_profile_path, save_profile_to_path,
     },
-    run::{ping_profile, run_profile, run_profile_with_secure_store_key},
+    registry::{
+        RegistryEntryStatus, append_history_entry, current_bundle_path, current_version,
+        load_registry, mark_history_entry, previous_successful_bundle_path, save_registry,
+        track_bundle_dir,
+    },
+    run::{ping_profile, run_profile, run_profile_with_secure_store_key_in_dir},
     secure_store::{
         clear_all_passwords, clear_password, load_password as load_secure_password,
         store_password_if_possible,
@@ -454,14 +461,28 @@ async fn run() -> Result<(), Error> {
             )
         }
         Command::Run(args) => {
-            let target = args.profile_or_default(global_profile);
-            if looks_like_profile_input(&target) {
-                run_profile(&target).await
+            if let Some(target) = args.profile.as_ref() {
+                if global_profile.is_none() && looks_like_profile_input(target) {
+                    run_profile(target).await
+                } else {
+                    run_bundle_path(target).await
+                }
             } else {
-                let bundle = load_bundle(&target)?;
-                let (_temp_dir, profile_path) = materialize_bundle(&bundle)?;
-                run_profile_with_secure_store_key(&profile_path, &target).await
+                let profile_input = args.explicit_profile(global_profile).ok_or_else(|| {
+                    Error::Registry(
+                        "run without a bundle requires --profile so the bundle track can be resolved".to_string(),
+                    )
+                })?;
+                run_registered_profile(&profile_input).await
             }
+        }
+        Command::Rollback(args) => {
+            let profile_input = args.explicit_profile(global_profile).ok_or_else(|| {
+                Error::Registry(
+                    "rollback requires --profile so the bundle track can be resolved".to_string(),
+                )
+            })?;
+            rollback_registered_profile(&profile_input).await
         }
         Command::Ping(args) => match args.command {
             Some(runvault::cli::PingSubcommand::Add(add)) => {
@@ -480,6 +501,175 @@ async fn run() -> Result<(), Error> {
             None => ping_profile(&args.profile_or_default(global_profile)).await,
         },
     }
+}
+
+async fn run_bundle_path(bundle_path: &Path) -> Result<(), Error> {
+    let bundle = load_bundle(bundle_path)?;
+    let version = bundle_version(&bundle)?;
+    let track = bundle_track_name(&bundle)?;
+    let stored_bundle_path = stage_bundle_for_track(bundle_path, &bundle, &track, &version)?;
+    let stored_dir = stored_bundle_path
+        .parent()
+        .ok_or_else(|| {
+            Error::Registry(format!(
+                "stored bundle path '{}' has no parent directory",
+                stored_bundle_path.display()
+            ))
+        })?
+        .to_path_buf();
+
+    let mut registry = load_registry()?;
+    let reuse_current =
+        current_version(&registry, &track).is_some_and(|current| current == version);
+    let history_index = if reuse_current {
+        None
+    } else {
+        let index =
+            append_history_entry(&mut registry, &track, &version, stored_bundle_path.clone())?;
+        save_registry(&registry)?;
+        Some(index)
+    };
+
+    let run_result = execute_bundle_at_path(&stored_bundle_path, &stored_dir).await;
+
+    if let Some(index) = history_index {
+        match run_result {
+            Ok(()) => {
+                mark_history_entry(&mut registry, &track, index, RegistryEntryStatus::Succeeded)?;
+                save_registry(&registry)?;
+                Ok(())
+            }
+            Err(err) => {
+                mark_history_entry(&mut registry, &track, index, RegistryEntryStatus::Failed)?;
+                save_registry(&registry)?;
+                Err(err)
+            }
+        }
+    } else {
+        run_result
+    }
+}
+
+async fn run_registered_profile(profile_input: &Path) -> Result<(), Error> {
+    ensure_default_profile_exists(profile_input)?;
+    let profile_path = resolve_profile_path(profile_input);
+    let profile = Profile::from_path(&profile_path)?;
+    let track = profile.name.clone();
+    let registry = load_registry()?;
+    let bundle_path = current_bundle_path(&registry, &track)?;
+    let bundle_dir = bundle_path
+        .parent()
+        .ok_or_else(|| {
+            Error::Registry(format!(
+                "registered bundle path '{}' has no parent directory",
+                bundle_path.display()
+            ))
+        })?
+        .to_path_buf();
+    execute_bundle_at_path(&bundle_path, &bundle_dir).await
+}
+
+async fn rollback_registered_profile(profile_input: &Path) -> Result<(), Error> {
+    ensure_default_profile_exists(profile_input)?;
+    let profile_path = resolve_profile_path(profile_input);
+    let profile = Profile::from_path(&profile_path)?;
+    let track = profile.name.clone();
+
+    let mut registry = load_registry()?;
+    let bundle_path = previous_successful_bundle_path(&registry, &track)?;
+    let bundle = load_bundle(&bundle_path)?;
+    let version = bundle_version(&bundle)?;
+    let bundle_dir = bundle_path
+        .parent()
+        .ok_or_else(|| {
+            Error::Registry(format!(
+                "registered bundle path '{}' has no parent directory",
+                bundle_path.display()
+            ))
+        })?
+        .to_path_buf();
+
+    let index = append_history_entry(&mut registry, &track, &version, bundle_path.clone())?;
+    save_registry(&registry)?;
+
+    match execute_bundle_at_path(&bundle_path, &bundle_dir).await {
+        Ok(()) => {
+            mark_history_entry(&mut registry, &track, index, RegistryEntryStatus::Succeeded)?;
+            save_registry(&registry)?;
+            Ok(())
+        }
+        Err(err) => {
+            mark_history_entry(&mut registry, &track, index, RegistryEntryStatus::Failed)?;
+            save_registry(&registry)?;
+            Err(err)
+        }
+    }
+}
+
+fn stage_bundle_for_track(
+    source_bundle_path: &Path,
+    bundle: &BundleDocument,
+    track: &str,
+    version: &str,
+) -> Result<PathBuf, Error> {
+    let bundle_dir = track_bundle_dir(track, version)?;
+    std::fs::create_dir_all(&bundle_dir).map_err(|source| Error::WriteFile {
+        path: bundle_dir.clone(),
+        source,
+    })?;
+    let stored_bundle_path = bundle_dir.join("bundle.yaml");
+    let source_bytes = std::fs::read(source_bundle_path).map_err(|source| Error::ReadFile {
+        path: source_bundle_path.to_path_buf(),
+        source,
+    })?;
+    if stored_bundle_path.exists() {
+        let existing = std::fs::read(&stored_bundle_path).map_err(|source| Error::ReadFile {
+            path: stored_bundle_path.clone(),
+            source,
+        })?;
+        if existing != source_bytes {
+            return Err(Error::Registry(format!(
+                "bundle version '{}' for track '{}' is already registered with different content",
+                version, track
+            )));
+        }
+    } else {
+        std::fs::write(&stored_bundle_path, source_bytes).map_err(|source| Error::WriteFile {
+            path: stored_bundle_path.clone(),
+            source,
+        })?;
+    }
+    materialize_bundle_into(&bundle_dir, bundle)?;
+    Ok(stored_bundle_path)
+}
+
+async fn execute_bundle_at_path(bundle_path: &Path, bundle_dir: &Path) -> Result<(), Error> {
+    let bundle = load_bundle(bundle_path)?;
+    let profile_path = materialize_bundle_into(bundle_dir, &bundle)?;
+    run_profile_with_secure_store_key_in_dir(&profile_path, &profile_path, bundle_dir).await
+}
+
+fn bundle_version(bundle: &BundleDocument) -> Result<String, Error> {
+    bundle
+        .version
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            Error::InvalidBundle(
+                "bundle version is required for registry-backed execution".to_string(),
+            )
+        })
+}
+
+fn bundle_track_name(bundle: &BundleDocument) -> Result<String, Error> {
+    let track = bundle.profile.name.trim();
+    if track.is_empty() {
+        return Err(Error::InvalidBundle(
+            "bundle profile.name must not be empty".to_string(),
+        ));
+    }
+    Ok(track.to_string())
 }
 
 fn looks_like_profile_input(path: &Path) -> bool {

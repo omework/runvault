@@ -38,6 +38,7 @@ runvault init deployments/ovh/services
 runvault --profile deployments/ovh/services run
 runvault bundle services.bundle.yaml --version v1.0.0 --description "OVH services profile"
 runvault run services.bundle.yaml
+runvault --profile deployments/ovh/services rollback
 runvault encrypt .env
 runvault jwt --issuer runvault --audience tempo --subject worker --ttl 15m
 runvault set DATABASE_URL --value postgres://...
@@ -225,16 +226,22 @@ Run it later with:
 
 ```bash
 runvault run services.bundle.yaml
+runvault --profile deployments/ovh/services run
+runvault --profile deployments/ovh/services rollback
 ```
 
 Behavior:
 
 - `bundle` defaults to `./.vault` if no profile is specified
 - existing bundle targets are rejected by default; use `--force` to overwrite them
-- `run <bundle-file>` unpacks into a temporary profile directory and runs from there
-- password reuse for bundle execution is keyed off the bundle file path, not the temporary extraction path
+- `run <bundle-file>` requires a bundle `version`, copies the bundle into `~/.runvault/bundles/<profile.name>/<version>/bundle.yaml`, materializes the bundled profile there, and runs from that stored directory
+- `run --profile <path>` with no bundle reruns the current successful bundle registered for that profile's `name`
+- `rollback --profile <path>` reruns the previous successful registered bundle for that profile's `name`
+- registry history is stored in `~/.runvault/registry.yaml` and version order follows deployment history, not semantic version sorting
+- password reuse for registered bundle execution is keyed off the stored profile path under `~/.runvault`
 - profile `resources:` are copied into the bundle and restored before execution
 - bundle schema version `1` uses structured YAML under top-level `env`, `files`, and `resources`
+- bundled relative target paths are normalized to explicit `./...` form and must not contain `..`
 
 ## Managing ping targets
 

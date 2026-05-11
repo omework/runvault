@@ -58,29 +58,40 @@ struct RuntimeWriteContext<'a> {
 }
 
 pub async fn run_profile(profile_path: &Path) -> Result<(), Error> {
-    run_profile_with_secure_store_key(profile_path, profile_path).await
+    let execution_dir = env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+    run_profile_with_secure_store_key_in_dir(profile_path, profile_path, &execution_dir).await
 }
 
 pub async fn run_profile_with_secure_store_key(
     profile_path: &Path,
     secure_store_key: &Path,
 ) -> Result<(), Error> {
+    let execution_dir = env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+    run_profile_with_secure_store_key_in_dir(profile_path, secure_store_key, &execution_dir).await
+}
+
+pub async fn run_profile_with_secure_store_key_in_dir(
+    profile_path: &Path,
+    secure_store_key: &Path,
+    execution_dir: &Path,
+) -> Result<(), Error> {
     ensure_default_profile_exists(profile_path)?;
     let profile_path = resolve_profile_path(profile_path);
     let profile = Profile::from_path(&profile_path)?;
-    let envs = load_profile_env_prompt(&profile, &profile_path, secure_store_key)?;
-    run_profile_with_loaded_env(&profile, envs).await
+    let envs = load_profile_env_prompt(&profile, &profile_path, secure_store_key, execution_dir)?;
+    run_profile_with_loaded_env(&profile, envs, execution_dir).await
 }
 
 async fn run_profile_with_loaded_env(
     profile: &Profile,
     loaded: LoadedProfileEnv,
+    execution_dir: &Path,
 ) -> Result<(), Error> {
     let LoadedProfileEnv {
         envs,
         mounted_files,
     } = loaded;
-    let mut child = spawn_profile_command(profile, envs)?;
+    let mut child = spawn_profile_command(profile, envs, execution_dir)?;
 
     let run_result = async {
         if !profile.pings.is_empty() {
@@ -111,10 +122,11 @@ async fn run_profile_with_loaded_env(
 fn spawn_profile_command(
     profile: &Profile,
     envs: BTreeMap<String, String>,
+    execution_dir: &Path,
 ) -> Result<tokio::process::Child, Error> {
     let mut command = Command::new(&profile.run.cmd[0]);
     command.args(&profile.run.cmd[1..]);
-    command.current_dir(resolve_workdir(profile));
+    command.current_dir(resolve_workdir(profile, execution_dir));
     command.stdin(std::process::Stdio::inherit());
     command.stdout(std::process::Stdio::inherit());
     command.stderr(std::process::Stdio::inherit());
@@ -148,9 +160,11 @@ fn load_profile_env_prompt(
     profile: &Profile,
     profile_path: &Path,
     secure_store_key: &Path,
+    execution_dir: &Path,
 ) -> Result<LoadedProfileEnv, Error> {
     if let Some(password) = load_secure_password(secure_store_key)? {
-        match load_profile_env_with_password(profile, profile_path, password.clone()) {
+        match load_profile_env_with_password(profile, profile_path, password.clone(), execution_dir)
+        {
             Ok(loaded) => {
                 store_password_if_possible(secure_store_key, &password)?;
                 return Ok(loaded);
@@ -163,7 +177,8 @@ fn load_profile_env_prompt(
     }
 
     let password = prompt_password_once()?;
-    let loaded = load_profile_env_with_password(profile, profile_path, password.clone())?;
+    let loaded =
+        load_profile_env_with_password(profile, profile_path, password.clone(), execution_dir)?;
     store_password_if_possible(secure_store_key, &password)?;
     Ok(loaded)
 }
@@ -172,9 +187,16 @@ fn load_profile_env_with_password(
     profile: &Profile,
     profile_path: &Path,
     password: age::secrecy::SecretString,
+    execution_dir: &Path,
 ) -> Result<LoadedProfileEnv, Error> {
     let vault = load_vault_with_password(profile, profile_path, password.clone())?;
-    materialize_loaded_env(profile_path, profile, vault.into_entries(), password)
+    materialize_loaded_env(
+        profile_path,
+        profile,
+        vault.into_entries(),
+        password,
+        execution_dir,
+    )
 }
 
 fn materialize_loaded_env(
@@ -182,8 +204,9 @@ fn materialize_loaded_env(
     profile: &Profile,
     values: BTreeMap<String, VaultValue>,
     password: age::secrecy::SecretString,
+    execution_dir: &Path,
 ) -> Result<LoadedProfileEnv, Error> {
-    let workdir = resolve_workdir(profile);
+    let workdir = resolve_workdir(profile, execution_dir);
     let mut envs = BTreeMap::new();
     let mut mounted_files =
         materialize_profile_resources(profile_path, profile, &workdir, &password)?;
@@ -418,11 +441,12 @@ fn cleanup_mounted_files(mounted_files: Vec<MountedFile>) {
     }
 }
 
-fn resolve_workdir(profile: &Profile) -> PathBuf {
-    profile
-        .workdir
-        .clone()
-        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf()))
+fn resolve_workdir(profile: &Profile, execution_dir: &Path) -> PathBuf {
+    match &profile.workdir {
+        Some(workdir) if workdir.is_absolute() => workdir.clone(),
+        Some(workdir) => execution_dir.join(workdir),
+        None => execution_dir.to_path_buf(),
+    }
 }
 
 fn default_pass_env_keys(profile_pass_env: &[String]) -> Vec<String> {
@@ -555,6 +579,7 @@ run:
             &profile,
             &profile_path,
             SecretString::from("test-password".to_string()),
+            dir.path(),
         )
         .unwrap();
 
@@ -595,6 +620,7 @@ run:
             &profile,
             &profile_path,
             SecretString::from("wrong".to_string()),
+            dir.path(),
         )
         .unwrap_err();
 
@@ -627,6 +653,7 @@ run:
                 envs,
                 mounted_files: vec![],
             },
+            dir.path(),
         )
         .await
         .unwrap();
@@ -658,10 +685,14 @@ run:
             },
         );
 
-        let loaded = materialize_loaded_env(dir.path(), &profile, values, test_password()).unwrap();
+        let loaded =
+            materialize_loaded_env(dir.path(), &profile, values, test_password(), dir.path())
+                .unwrap();
         assert!(runtime_secret.exists());
 
-        run_profile_with_loaded_env(&profile, loaded).await.unwrap();
+        run_profile_with_loaded_env(&profile, loaded, dir.path())
+            .await
+            .unwrap();
 
         assert_eq!(
             std::fs::read_to_string(output).unwrap(),
@@ -693,7 +724,9 @@ run:
             },
         );
 
-        let loaded = materialize_loaded_env(dir.path(), &profile, values, test_password()).unwrap();
+        let loaded =
+            materialize_loaded_env(dir.path(), &profile, values, test_password(), dir.path())
+                .unwrap();
         assert!(runtime_secret.exists());
         assert_eq!(
             std::fs::read_to_string(&runtime_secret).unwrap(),
@@ -724,8 +757,8 @@ run:
             },
         );
 
-        let err =
-            materialize_loaded_env(dir.path(), &profile, values, test_password()).unwrap_err();
+        let err = materialize_loaded_env(dir.path(), &profile, values, test_password(), dir.path())
+            .unwrap_err();
         let message = err.to_string();
         assert!(matches!(err, Error::RuntimeMaterialization { .. }));
         assert!(message.contains("file-backed value 'SERVICE_TLS_KEY'"));
@@ -763,9 +796,13 @@ run:
             },
         );
 
-        let loaded = materialize_loaded_env(dir.path(), &profile, values, test_password()).unwrap();
+        let loaded =
+            materialize_loaded_env(dir.path(), &profile, values, test_password(), dir.path())
+                .unwrap();
         assert!(runtime_secret.exists());
-        run_profile_with_loaded_env(&profile, loaded).await.unwrap();
+        run_profile_with_loaded_env(&profile, loaded, dir.path())
+            .await
+            .unwrap();
         assert_eq!(
             std::fs::read_to_string(output).unwrap(),
             "pki/root.crt.pem|root-ca"
@@ -789,7 +826,9 @@ run:
             },
         );
 
-        let loaded = materialize_loaded_env(dir.path(), &profile, values, test_password()).unwrap();
+        let loaded =
+            materialize_loaded_env(dir.path(), &profile, values, test_password(), dir.path())
+                .unwrap();
         assert!(runtime_secret.exists());
         cleanup_mounted_files(loaded.mounted_files);
         assert!(runtime_secret.exists());
@@ -814,7 +853,9 @@ run:
             },
         );
 
-        let loaded = materialize_loaded_env(dir.path(), &profile, values, test_password()).unwrap();
+        let loaded =
+            materialize_loaded_env(dir.path(), &profile, values, test_password(), dir.path())
+                .unwrap();
         assert_eq!(std::fs::read_to_string(&runtime_secret).unwrap(), "root-ca");
         cleanup_mounted_files(loaded.mounted_files);
         assert!(runtime_secret.exists());
@@ -839,8 +880,8 @@ run:
             },
         );
 
-        let err =
-            materialize_loaded_env(dir.path(), &profile, values, test_password()).unwrap_err();
+        let err = materialize_loaded_env(dir.path(), &profile, values, test_password(), dir.path())
+            .unwrap_err();
         assert!(matches!(err, Error::RuntimeFilePathExists(_)));
         assert_eq!(
             std::fs::read_to_string(&runtime_secret).unwrap(),
@@ -866,8 +907,14 @@ run:
             },
         );
 
-        let loaded =
-            materialize_loaded_env(dir.path(), &profile, BTreeMap::new(), test_password()).unwrap();
+        let loaded = materialize_loaded_env(
+            dir.path(),
+            &profile,
+            BTreeMap::new(),
+            test_password(),
+            dir.path(),
+        )
+        .unwrap();
         assert!(runtime_compose.exists());
         assert_eq!(
             std::fs::read_to_string(&runtime_compose).unwrap(),
@@ -902,8 +949,14 @@ run:
             },
         );
 
-        let loaded =
-            materialize_loaded_env(dir.path(), &profile, BTreeMap::new(), test_password()).unwrap();
+        let loaded = materialize_loaded_env(
+            dir.path(),
+            &profile,
+            BTreeMap::new(),
+            test_password(),
+            dir.path(),
+        )
+        .unwrap();
         assert!(
             std::fs::read_to_string(&runtime_key)
                 .unwrap()
@@ -946,7 +999,8 @@ run:
         );
 
         let loaded =
-            materialize_loaded_env(&profile_path, &profile, values, test_password()).unwrap();
+            materialize_loaded_env(&profile_path, &profile, values, test_password(), dir.path())
+                .unwrap();
         assert!(dir.path().join("caddy/Caddyfile").exists());
         assert!(!profile_dir.join("caddy/Caddyfile").exists());
 

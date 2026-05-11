@@ -8,6 +8,7 @@ pub mod password;
 pub mod ping;
 pub mod pki;
 pub mod profile;
+pub mod registry;
 pub mod run;
 pub mod secure_store;
 pub mod vault;
