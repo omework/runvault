@@ -2,13 +2,14 @@
 name = "runvault"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 
 [dependencies]
 age = { version = "0.11.1", features = ["armor"] }
 base64 = "0.22.1"
 clap = { version = "4.5.39", features = ["derive"] }
 jsonwebtoken = "9.3.1"
-openssl = "0.10.76"
+openssl = { version = "0.10.76", features = ["vendored"] }
 pbkdf2 = { version = "0.12.2", features = ["hmac"] }
 rand = "0.9.2"
 ring = "0.17.14"
