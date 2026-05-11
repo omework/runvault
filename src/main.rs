@@ -53,7 +53,7 @@ async fn run() -> Result<(), Error> {
                 save_profile_to_path(&profile_path, &profile)
             }
         },
-        Command::CreateProfile(args) => {
+        Command::Init(args) => {
             let created = create_profile(
                 &args.profile_or_default(global_profile),
                 &CreateProfileOptions {
@@ -238,8 +238,11 @@ async fn run() -> Result<(), Error> {
                     .unwrap_or_else(|| PathBuf::from(runvault::profile::DEFAULT_PROFILE_DIR));
                 ensure_default_profile_exists(&profile_input)?;
                 let profile_path = resolve_profile_path(&profile_input);
+                let profile = Profile::from_path(&profile_path)?;
+                let password = load_profile_secret_password(&profile, &profile_path, true)?;
                 let created = init_profile_pki(
                     &profile_path,
+                    password,
                     &PkiInitOptions {
                         common_name: args.common_name,
                         days: args.days,
@@ -254,6 +257,8 @@ async fn run() -> Result<(), Error> {
                     .unwrap_or_else(|| PathBuf::from(runvault::profile::DEFAULT_PROFILE_DIR));
                 ensure_default_profile_exists(&profile_input)?;
                 let profile_path = resolve_profile_path(&profile_input);
+                let profile = Profile::from_path(&profile_path)?;
+                let password = load_profile_secret_password(&profile, &profile_path, false)?;
                 let ip_addrs = args
                     .ip_addrs
                     .into_iter()
@@ -265,6 +270,7 @@ async fn run() -> Result<(), Error> {
                     .collect::<Result<Vec<_>, _>>()?;
                 let created = issue_profile_certificate(
                     &profile_path,
+                    password,
                     &args.name,
                     &PkiIssueOptions {
                         common_name: args.common_name,
@@ -580,6 +586,46 @@ fn load_vault_with_lazy_password(
     let vault = load_vault_with_password(profile, profile_path, password.clone())?;
     store_password_if_possible(profile_path, &password)?;
     Ok((vault, password))
+}
+
+fn load_profile_secret_password(
+    profile: &Profile,
+    profile_path: &PathBuf,
+    confirm_if_uncached: bool,
+) -> Result<age::secrecy::SecretString, Error> {
+    let env_path = profile.resolve_env_path(profile_path);
+    if env_path.exists() {
+        if let Some(password) = load_secure_password(profile_path)? {
+            match load_vault_with_password(profile, profile_path, password.clone()) {
+                Ok(_) => {
+                    store_password_if_possible(profile_path, &password)?;
+                    return Ok(password);
+                }
+                Err(Error::Decryption(_)) => {
+                    clear_password(profile_path)?;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        let password = prompt_password_once()?;
+        load_vault_with_password(profile, profile_path, password.clone())?;
+        store_password_if_possible(profile_path, &password)?;
+        return Ok(password);
+    }
+
+    if let Some(password) = load_secure_password(profile_path)? {
+        store_password_if_possible(profile_path, &password)?;
+        return Ok(password);
+    }
+
+    let password = if confirm_if_uncached {
+        prompt_password_confirm()?
+    } else {
+        prompt_password_once()?
+    };
+    store_password_if_possible(profile_path, &password)?;
+    Ok(password)
 }
 
 fn load_vault_with_lazy_password_for_update(

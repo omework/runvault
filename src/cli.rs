@@ -15,7 +15,8 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     Cmd(CmdCommand),
-    CreateProfile(CreateProfileArgs),
+    #[command(name = "init", alias = "create-profile")]
+    Init(CreateProfileArgs),
     Bundle(BundleArgs),
     Cache(CacheCommand),
     Encrypt(EncryptArgs),

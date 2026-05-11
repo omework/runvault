@@ -1,6 +1,6 @@
 use std::{
     env,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::Command,
 };
 
@@ -136,18 +136,36 @@ pub fn clear_all_passwords() -> Result<(), Error> {
 }
 
 fn store_key(profile_path: &Path) -> Result<String, Error> {
-    let absolute = if profile_path.is_absolute() {
-        profile_path.to_path_buf()
+    let absolute = if profile_path.exists() {
+        profile_path.canonicalize().map_err(Error::PasswordPrompt)?
+    } else if profile_path.is_absolute() {
+        normalize_pathbuf(profile_path.to_path_buf())
     } else {
-        env::current_dir()
-            .map_err(Error::PasswordPrompt)?
-            .join(profile_path)
+        normalize_pathbuf(
+            env::current_dir()
+                .map_err(Error::PasswordPrompt)?
+                .join(profile_path),
+        )
     };
     Ok(format!("profile:{}", normalize_path(&absolute)))
 }
 
 fn normalize_path(path: &PathBuf) -> String {
     path.to_string_lossy().to_string()
+}
+
+fn normalize_pathbuf(path: PathBuf) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn is_noninteractive_keychain_error(message: &str) -> bool {
@@ -157,11 +175,20 @@ fn is_noninteractive_keychain_error(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::store_key;
+    use std::env;
 
     #[test]
     fn store_key_is_stable() {
         let key = store_key(std::path::Path::new("/tmp/demo/runvault.yaml")).unwrap();
         assert_eq!(key, "profile:/tmp/demo/runvault.yaml");
+    }
+
+    #[test]
+    fn store_key_normalizes_relative_profile_paths() {
+        let cwd = env::current_dir().unwrap();
+        let expected = cwd.join(".vault/runvault.yaml");
+        let key = store_key(std::path::Path::new("./service/../.vault/./runvault.yaml")).unwrap();
+        assert_eq!(key, format!("profile:{}", expected.to_string_lossy()));
     }
 
     #[cfg(not(target_os = "macos"))]

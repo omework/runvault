@@ -33,8 +33,8 @@ The flag takes precedence over legacy positional profile arguments.
 ## Commands
 
 ```bash
-runvault create-profile
-runvault create-profile deployments/ovh/services
+runvault init
+runvault init deployments/ovh/services
 runvault --profile deployments/ovh/services run
 runvault bundle services.bundle.yaml --version v1.0.0 --description "OVH services profile"
 runvault run services.bundle.yaml
@@ -70,7 +70,7 @@ runvault ping
 runvault cache clear deployments/ovh/services
 ```
 
-`create-profile` bootstraps the profile folder by creating:
+`init` bootstraps the profile folder by creating:
 
 - `runvault.yaml`
 
@@ -80,15 +80,16 @@ It does not create `env.sec`; that file is created lazily by the first `set` or 
 
 ```text
 <profile-folder>/pki/
-  ca/root/root.key.pem
+  ca/root/root.key.pem.sec
   ca/root/root.crt.pem
   ca/root/root.chain.pem
   issued/<name>/<name>.key.pem
+  issued/<name>/<name>.key.pem.sec
   issued/<name>/<name>.crt.pem
   issued/<name>/<name>.chain.pem
 ```
 
-`runvault pki init` creates the profile root CA. `runvault pki issue` signs a leaf with that root. If you do not pass `--client` or `--server`, the issued cert gets both usages. If you issue a server cert without any `--dns` or `--ip` SANs, `runvault` uses the certificate name as the default DNS SAN.
+`runvault pki init` creates the profile root CA. `runvault pki issue` signs a leaf with that root. The root CA private key is stored encrypted as `root.key.pem.sec`, and issued leaves also get an encrypted sidecar copy as `<name>.key.pem.sec`. If you do not pass `--client` or `--server`, the issued cert gets both usages. If you issue a server cert without any `--dns` or `--ip` SANs, `runvault` uses the certificate name as the default DNS SAN.
 
 ## Secure password reuse
 
@@ -157,14 +158,14 @@ Inside `runvault.yaml`, `resources:` uses profile field names:
 Bootstrap a new profile folder with:
 
 ```bash
-runvault create-profile
-runvault create-profile deployments/ovh/services
+runvault init
+runvault init deployments/ovh/services
 ```
 
 You can override the generated profile name and encrypted env filename:
 
 ```bash
-runvault create-profile deployments/ovh/services \
+runvault init deployments/ovh/services \
   --name ovh-services \
   --env-file env.sec
 ```
