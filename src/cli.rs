@@ -156,6 +156,8 @@ pub struct PkiInitArgs {
     pub common_name: Option<String>,
     #[arg(long, default_value_t = 3650)]
     pub days: u32,
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -174,6 +176,8 @@ pub struct PkiIssueArgs {
     pub server: bool,
     #[arg(long, default_value_t = 825)]
     pub days: u32,
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -748,6 +752,7 @@ mod tests {
             "init",
             "--days",
             "3650",
+            "--force",
         ])
         .unwrap();
 
@@ -759,6 +764,7 @@ mod tests {
             panic!("expected pki init subcommand");
         };
         assert_eq!(args.days, 3650);
+        assert!(args.force);
     }
 
     #[test]
@@ -774,6 +780,7 @@ mod tests {
             "--ip",
             "127.0.0.1",
             "--server",
+            "--force",
         ])
         .unwrap();
 
@@ -788,6 +795,7 @@ mod tests {
         assert_eq!(args.ip_addrs, vec!["127.0.0.1"]);
         assert!(args.server);
         assert!(!args.client);
+        assert!(args.force);
     }
 
     #[test]

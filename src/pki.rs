@@ -28,11 +28,13 @@ const LEAF_KEY_BITS: u32 = 2048;
 const PKI_SCHEMA_VERSION: u8 = 1;
 const PKI_DIR_NAME: &str = "pki";
 const PKI_INFRA_FILE_NAME: &str = "infra.yaml";
+pub const DEFAULT_ROOT_CA_DAYS: u32 = 3650;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PkiInitOptions {
     pub common_name: Option<String>,
     pub days: u32,
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +45,7 @@ pub struct PkiIssueOptions {
     pub client: bool,
     pub server: bool,
     pub days: u32,
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +113,24 @@ pub fn rotate_infra_certificates(password: SecretString) -> Result<(), Error> {
     rotate_infra_certificates_at(&root_dir, password)
 }
 
+fn default_init_options() -> PkiInitOptions {
+    PkiInitOptions {
+        common_name: None,
+        days: DEFAULT_ROOT_CA_DAYS,
+        force: false,
+    }
+}
+
+fn ensure_infra_pki_at(root_dir: &Path, password: SecretString) -> Result<(), Error> {
+    let infra_path = root_dir.join(PKI_INFRA_FILE_NAME);
+    if infra_path.exists() {
+        return Ok(());
+    }
+
+    init_infra_pki_at(root_dir, password, &default_init_options())?;
+    Ok(())
+}
+
 fn init_infra_pki_at(
     root_dir: &Path,
     password: SecretString,
@@ -130,10 +151,19 @@ fn init_infra_pki_at(
         &root_cert_path,
         &root_chain_path,
     ] {
-        if path.exists() {
+        if path.exists() && !options.force {
             return Err(Error::AlreadyExists(path.clone()));
         }
     }
+
+    let existing_issued = if options.force && infra_path.exists() {
+        match load_infra_document(&infra_path) {
+            Ok(infra) => infra.issued,
+            Err(_) => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
 
     let root_material_dir = root_key_path
         .parent()
@@ -158,7 +188,7 @@ fn init_infra_pki_at(
     write_encrypted_pem(
         &root_key_path,
         &key.private_key_to_pem_pkcs8().map_err(pki_error)?,
-        password,
+        password.clone(),
     )?;
     let cert_pem = cert.to_pem().map_err(pki_error)?;
     write_pem(&root_cert_path, &cert_pem)?;
@@ -175,9 +205,34 @@ fn init_infra_pki_at(
                 cert_path: root_cert_rel,
                 chain_path: root_chain_rel,
             },
-            issued: Vec::new(),
+            issued: existing_issued.clone(),
         },
     )?;
+
+    for issued in &existing_issued {
+        let key_path = pki_dir.join(&issued.key_path);
+        let cert_path = pki_dir.join(&issued.cert_path);
+        let chain_path = pki_dir.join(&issued.chain_path);
+        let common_name = issued
+            .common_name
+            .clone()
+            .unwrap_or_else(|| issued.name.clone());
+        write_leaf_materials(
+            &key_path,
+            &cert_path,
+            &chain_path,
+            &key,
+            &cert,
+            &common_name,
+            &issued.name,
+            &issued.dns_names,
+            &issued.ip_addrs,
+            issued.client,
+            issued.server,
+            issued.days,
+            password.clone(),
+        )?;
+    }
 
     Ok(root_material_dir.to_path_buf())
 }
@@ -189,11 +244,13 @@ fn issue_infra_certificate_at(
     options: &PkiIssueOptions,
 ) -> Result<PathBuf, Error> {
     validate_leaf_name(name)?;
+    ensure_infra_pki_at(root_dir, password.clone())?;
     let pki_dir = root_dir.to_path_buf();
     let infra_path = pki_dir.join(PKI_INFRA_FILE_NAME);
     let mut infra = load_infra_document(&infra_path)?;
 
-    if infra.issued.iter().any(|issued| issued.name == name) {
+    let existing_issued_index = infra.issued.iter().position(|issued| issued.name == name);
+    if existing_issued_index.is_some() && !options.force {
         return Err(Error::AlreadyExists(pki_dir.join("issued").join(name)));
     }
 
@@ -234,7 +291,7 @@ fn issue_infra_certificate_at(
     let chain_path = pki_dir.join(&chain_rel);
 
     for path in [&key_path, &cert_path, &chain_path] {
-        if path.exists() {
+        if path.exists() && !options.force {
             return Err(Error::AlreadyExists(path.clone()));
         }
     }
@@ -255,7 +312,7 @@ fn issue_infra_certificate_at(
         password,
     )?;
 
-    infra.issued.push(PkiIssuedRecord {
+    let issued_record = PkiIssuedRecord {
         name: name.to_string(),
         common_name,
         dns_names,
@@ -266,7 +323,12 @@ fn issue_infra_certificate_at(
         key_path: key_rel,
         cert_path: cert_rel,
         chain_path: chain_rel,
-    });
+    };
+    if let Some(index) = existing_issued_index {
+        infra.issued[index] = issued_record;
+    } else {
+        infra.issued.push(issued_record);
+    }
     save_infra_document(&infra_path, &infra)?;
 
     Ok(cert_path
@@ -276,6 +338,7 @@ fn issue_infra_certificate_at(
 }
 
 fn rotate_infra_certificates_at(root_dir: &Path, password: SecretString) -> Result<(), Error> {
+    ensure_infra_pki_at(root_dir, password.clone())?;
     let pki_dir = root_dir.to_path_buf();
     let infra_path = pki_dir.join(PKI_INFRA_FILE_NAME);
     let infra = load_infra_document(&infra_path)?;
@@ -637,8 +700,8 @@ fn pki_error(err: openssl::error::ErrorStack) -> Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        PkiInitOptions, PkiIssueOptions, init_infra_pki_at, issue_infra_certificate_at,
-        load_infra_document, rotate_infra_certificates_at,
+        DEFAULT_ROOT_CA_DAYS, PkiInitOptions, PkiIssueOptions, init_infra_pki_at,
+        issue_infra_certificate_at, load_infra_document, rotate_infra_certificates_at,
     };
     use crate::error::Error;
     use age::secrecy::SecretString;
@@ -655,6 +718,7 @@ mod tests {
             &PkiInitOptions {
                 common_name: None,
                 days: 3650,
+                force: false,
             },
         )
         .unwrap();
@@ -676,6 +740,7 @@ mod tests {
             &PkiInitOptions {
                 common_name: Some("Infra Root".to_string()),
                 days: 3650,
+                force: false,
             },
         )
         .unwrap();
@@ -691,6 +756,7 @@ mod tests {
                 client: false,
                 server: true,
                 days: 825,
+                force: false,
             },
         )
         .unwrap();
@@ -713,6 +779,7 @@ mod tests {
             &PkiInitOptions {
                 common_name: None,
                 days: 3650,
+                force: false,
             },
         )
         .unwrap();
@@ -727,6 +794,7 @@ mod tests {
                 client: true,
                 server: true,
                 days: 825,
+                force: false,
             },
         )
         .unwrap();
@@ -748,6 +816,7 @@ mod tests {
             &PkiInitOptions {
                 common_name: None,
                 days: 3650,
+                force: false,
             },
         )
         .unwrap();
@@ -762,6 +831,7 @@ mod tests {
                 client: true,
                 server: true,
                 days: 825,
+                force: false,
             },
         )
         .unwrap();
@@ -777,10 +847,164 @@ mod tests {
                 client: true,
                 server: true,
                 days: 825,
+                force: false,
             },
         )
         .unwrap_err();
         assert!(matches!(err, Error::AlreadyExists(_)));
+    }
+
+    #[test]
+    fn issue_auto_initializes_missing_infra() {
+        let dir = tempdir().unwrap();
+
+        let issued_dir = issue_infra_certificate_at(
+            dir.path(),
+            SecretString::from("secret".to_string()),
+            "api.service.local",
+            &PkiIssueOptions {
+                common_name: None,
+                dns_names: vec![],
+                ip_addrs: vec![],
+                client: false,
+                server: true,
+                days: 825,
+                force: false,
+            },
+        )
+        .unwrap();
+
+        let infra = load_infra_document(&dir.path().join("infra.yaml")).unwrap();
+        assert_eq!(infra.root.common_name, "Runvault Root CA");
+        assert_eq!(infra.root.days, DEFAULT_ROOT_CA_DAYS);
+        assert_eq!(infra.issued.len(), 1);
+        assert!(issued_dir.join("api.service.local.crt.pem").exists());
+    }
+
+    #[test]
+    fn rotate_auto_initializes_missing_infra() {
+        let dir = tempdir().unwrap();
+
+        rotate_infra_certificates_at(dir.path(), SecretString::from("secret".to_string())).unwrap();
+
+        let infra = load_infra_document(&dir.path().join("infra.yaml")).unwrap();
+        assert_eq!(infra.root.common_name, "Runvault Root CA");
+        assert_eq!(infra.root.days, DEFAULT_ROOT_CA_DAYS);
+        assert!(infra.issued.is_empty());
+    }
+
+    #[test]
+    fn force_init_overwrites_root_and_reissues_tracked_leafs() {
+        let dir = tempdir().unwrap();
+        let password = SecretString::from("secret".to_string());
+
+        init_infra_pki_at(
+            dir.path(),
+            password.clone(),
+            &PkiInitOptions {
+                common_name: Some("Initial Root".to_string()),
+                days: 3650,
+                force: false,
+            },
+        )
+        .unwrap();
+        let issued_dir = issue_infra_certificate_at(
+            dir.path(),
+            password.clone(),
+            "service",
+            &PkiIssueOptions {
+                common_name: Some("service".to_string()),
+                dns_names: vec!["service.example.com".to_string()],
+                ip_addrs: vec![],
+                client: true,
+                server: true,
+                days: 825,
+                force: false,
+            },
+        )
+        .unwrap();
+        let root_before = std::fs::read(dir.path().join("ca/root/root.crt.pem")).unwrap();
+        let leaf_before = std::fs::read(issued_dir.join("service.crt.pem")).unwrap();
+
+        init_infra_pki_at(
+            dir.path(),
+            password,
+            &PkiInitOptions {
+                common_name: Some("Replacement Root".to_string()),
+                days: 3650,
+                force: true,
+            },
+        )
+        .unwrap();
+
+        let infra = load_infra_document(&dir.path().join("infra.yaml")).unwrap();
+        let root_after = std::fs::read(dir.path().join("ca/root/root.crt.pem")).unwrap();
+        let leaf_after = std::fs::read(issued_dir.join("service.crt.pem")).unwrap();
+
+        assert_eq!(infra.root.common_name, "Replacement Root");
+        assert_eq!(infra.issued.len(), 1);
+        assert_ne!(root_before, root_after);
+        assert_ne!(leaf_before, leaf_after);
+    }
+
+    #[test]
+    fn force_issue_overwrites_existing_leaf_material() {
+        let dir = tempdir().unwrap();
+        let password = SecretString::from("secret".to_string());
+
+        init_infra_pki_at(
+            dir.path(),
+            password.clone(),
+            &PkiInitOptions {
+                common_name: None,
+                days: 3650,
+                force: false,
+            },
+        )
+        .unwrap();
+        let issued_dir = issue_infra_certificate_at(
+            dir.path(),
+            password.clone(),
+            "shared-name",
+            &PkiIssueOptions {
+                common_name: Some("initial".to_string()),
+                dns_names: vec!["initial.example.com".to_string()],
+                ip_addrs: vec![],
+                client: false,
+                server: true,
+                days: 825,
+                force: false,
+            },
+        )
+        .unwrap();
+        let leaf_before = std::fs::read(issued_dir.join("shared-name.crt.pem")).unwrap();
+
+        issue_infra_certificate_at(
+            dir.path(),
+            password,
+            "shared-name",
+            &PkiIssueOptions {
+                common_name: Some("replacement".to_string()),
+                dns_names: vec!["replacement.example.com".to_string()],
+                ip_addrs: vec![],
+                client: true,
+                server: true,
+                days: 900,
+                force: true,
+            },
+        )
+        .unwrap();
+
+        let infra = load_infra_document(&dir.path().join("infra.yaml")).unwrap();
+        let leaf_after = std::fs::read(issued_dir.join("shared-name.crt.pem")).unwrap();
+
+        assert_eq!(infra.issued.len(), 1);
+        assert_eq!(infra.issued[0].common_name.as_deref(), Some("replacement"));
+        assert_eq!(infra.issued[0].dns_names, vec!["replacement.example.com"]);
+        assert!(infra.issued[0].client);
+        assert!(infra.issued[0].server);
+        assert_eq!(infra.issued[0].days, 900);
+        assert_ne!(leaf_before, leaf_after);
     }
 
     #[test]
@@ -793,6 +1017,7 @@ mod tests {
             &PkiInitOptions {
                 common_name: None,
                 days: 3650,
+                force: false,
             },
         )
         .unwrap();
@@ -808,6 +1033,7 @@ mod tests {
                 client: false,
                 server: true,
                 days: 825,
+                force: false,
             },
         )
         .unwrap();

@@ -93,7 +93,9 @@ runvault cmd set -- docker compose up -d
 runvault --profile deployments/ovh/services cmd set -- docker compose up -d
 runvault ping add api http://127.0.0.1:8080/health
 runvault pki init
+runvault pki init --force
 runvault pki issue --name glt.market --dns glt.market --server
+runvault pki issue --name glt.market --dns glt.market --server --force
 runvault pki issue --name mazie-client --client
 runvault pki rotate
 runvault set deployments/ovh/services TLS_KEY \
@@ -138,7 +140,7 @@ The profile data key is wrapped with a key derived from the global passphrase, a
   issued/<name>/<name>.chain.pem
 ```
 
-`runvault pki init` creates the machine root CA and records it in `~/.runvault/pki/infra.yaml`. `runvault pki issue --name ...` signs a leaf with that root, stores the leaf spec in `infra.yaml`, and writes the materials under `~/.runvault/pki/issued/<name>/`. `runvault pki rotate` replays the tracked issued-leaf inventory and regenerates all leaf keys/certs in place while keeping the current root CA unchanged. Private key files keep their normal `*.key.pem` names, and `runvault` stores them as standard passphrase-encrypted PKCS#8 PEM files so they can also be reused outside `runvault` with the same passphrase. If you do not pass `--client` or `--server`, the issued cert gets both usages. If you issue a server cert without any `--dns` or `--ip` SANs, `runvault` uses the certificate name as the default DNS SAN.
+`runvault pki init` creates the machine root CA and records it in `~/.runvault/pki/infra.yaml`. `runvault pki issue --name ...` signs a leaf with that root, stores the leaf spec in `infra.yaml`, and writes the materials under `~/.runvault/pki/issued/<name>/`. If the PKI infra does not exist yet, `runvault pki issue` and `runvault pki rotate` bootstrap it automatically first with the default root settings. Use `--force` with `runvault pki init` to replace the existing root material and reissue tracked leaf certificates under the new root. Use `--force` with `runvault pki issue` to overwrite an existing issued leaf with the same `--name`. `runvault pki rotate` replays the tracked issued-leaf inventory and regenerates all leaf keys/certs in place while keeping the current root CA unchanged. Private key files keep their normal `*.key.pem` names, and `runvault` stores them as standard passphrase-encrypted PKCS#8 PEM files so they can also be reused outside `runvault` with the same passphrase. If you do not pass `--client` or `--server`, the issued cert gets both usages. If you issue a server cert without any `--dns` or `--ip` SANs, `runvault` uses the certificate name as the default DNS SAN.
 
 ## Secure password reuse
 

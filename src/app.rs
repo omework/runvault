@@ -262,6 +262,7 @@ impl Runvault {
                     let created = self.init_pki(&PkiInitOptions {
                         common_name: args.common_name,
                         days: args.days,
+                        force: args.force,
                     })?;
                     println!("{}", created.display());
                     Ok(())
@@ -276,6 +277,7 @@ impl Runvault {
                             client: args.client,
                             server: args.server,
                             days: args.days,
+                            force: args.force,
                         },
                     )?;
                     println!("{}", created.display());
@@ -553,11 +555,11 @@ impl Runvault {
         name: &str,
         options: &PkiIssueOptions,
     ) -> Result<PathBuf, Error> {
-        pki::issue_infra_certificate(self.load_pki_secret_password(false)?, name, options)
+        pki::issue_infra_certificate(self.load_pki_secret_password_for_pki_use()?, name, options)
     }
 
     pub fn rotate_pki(&self) -> Result<(), Error> {
-        pki::rotate_infra_certificates(self.load_pki_secret_password(false)?)
+        pki::rotate_infra_certificates(self.load_pki_secret_password_for_pki_use()?)
     }
 
     pub fn import_env_files(
@@ -990,6 +992,11 @@ impl Runvault {
         };
         secure_store::store_password_if_possible(&secure_store_key, &password)?;
         Ok(password)
+    }
+
+    fn load_pki_secret_password_for_pki_use(&self) -> Result<SecretString, Error> {
+        let needs_init = !pki::pki_infra_path()?.exists();
+        self.load_pki_secret_password(needs_init)
     }
 
     fn load_vault_with_lazy_password_for_update(
