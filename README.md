@@ -76,6 +76,7 @@ The flag takes precedence over legacy positional profile arguments.
 runvault init
 runvault init deployments/ovh/services
 runvault --profile deployments/ovh/services run
+runvault reset
 runvault bundle services.bundle.yaml --version v1.0.0 --description "OVH services profile"
 runvault run services.bundle.yaml
 runvault --profile deployments/ovh/services rollback
@@ -132,15 +133,15 @@ The profile data key is wrapped with a key derived from the global passphrase, a
 ```text
 ~/.runvault/pki/
   infra.yaml
-  ca/root/root.key.pem
-  ca/root/root.crt.pem
-  ca/root/root.chain.pem
-  issued/<name>/<name>.key.pem
-  issued/<name>/<name>.crt.pem
-  issued/<name>/<name>.chain.pem
+  ca/key.pem
+  ca/crt.pem
+  ca/chain.pem
+  issued/<name>/key.pem
+  issued/<name>/crt.pem
+  issued/<name>/chain.pem
 ```
 
-`runvault pki init` creates the machine root CA and records it in `~/.runvault/pki/infra.yaml`. `runvault pki issue --name ...` signs a leaf with that root, stores the leaf spec in `infra.yaml`, and writes the materials under `~/.runvault/pki/issued/<name>/`. If the PKI infra does not exist yet, `runvault pki issue` and `runvault pki rotate` bootstrap it automatically first with the default root settings. Use `--force` with `runvault pki init` to replace the existing root material and reissue tracked leaf certificates under the new root. Use `--force` with `runvault pki issue` to overwrite an existing issued leaf with the same `--name`. `runvault pki rotate` replays the tracked issued-leaf inventory and regenerates all leaf keys/certs in place while keeping the current root CA unchanged. Private key files keep their normal `*.key.pem` names, and `runvault` stores them as standard passphrase-encrypted PKCS#8 PEM files so they can also be reused outside `runvault` with the same passphrase. If you do not pass `--client` or `--server`, the issued cert gets both usages. If you issue a server cert without any `--dns` or `--ip` SANs, `runvault` uses the certificate name as the default DNS SAN.
+`runvault pki init` creates the machine root CA and records it in `~/.runvault/pki/infra.yaml`. `runvault pki issue --name ...` signs a leaf with that root, stores the leaf spec in `infra.yaml`, and writes the materials under `~/.runvault/pki/issued/<name>/`. If the PKI infra does not exist yet, `runvault pki issue` and `runvault pki rotate` bootstrap it automatically first with the default root settings. Use `--force` with `runvault pki init` to replace the existing root material and reissue tracked leaf certificates under the new root. Use `--force` with `runvault pki issue` to overwrite an existing issued leaf with the same `--name`. `runvault pki rotate` replays the tracked issued-leaf inventory and regenerates all leaf keys/certs in place while keeping the current root CA unchanged. Private key files keep their normal `*.key.pem` names, and `runvault` stores them as standard passphrase-encrypted PKCS#8 PEM files so they can also be reused outside `runvault` with the same passphrase. Profile and import specs can reference PKI material with `pki://<name>/<key.pem|crt.pem|chain.pem>`, where `ca` is the reserved root name, for example `pki://ca/crt.pem` or `pki://glt.market/key.pem`. If you do not pass `--client` or `--server`, the issued cert gets both usages. If you issue a server cert without any `--dns` or `--ip` SANs, `runvault` uses the certificate name as the default DNS SAN.
 
 ## Secure password reuse
 
@@ -167,6 +168,14 @@ runvault cache clear deployments/ovh/services
 ```
 
 On macOS this removes the matching Keychain-backed runvault entry for that profile.
+
+To wipe local Runvault machine state and recreate an empty `~/.runvault` directory:
+
+```bash
+runvault reset
+```
+
+This clears the filesystem content under `~/.runvault` and removes the global cached passphrase entry used by Runvault.
 
 ## Profile format
 
@@ -563,12 +572,12 @@ Spec format:
 ```yaml
 files:
   SERVICE_CA_CRT:
-    src: ~/.runvault/pki/ca/root/root.crt.pem
+    src: pki://ca/crt.pem
     to-file: /home/debian/mata35/pki/root.crt.pem
     mode: "0644"
     cleanup: keep
   SERVICE_KEY:
-    src: ~/.runvault/pki/issued/glt.market/glt.market.key.pem
+    src: pki://glt.market/key.pem
     to-file: /home/debian/mata35/pki/glt.market.key.pem
     mode: "0600"
     cleanup: keep

@@ -26,7 +26,7 @@ use crate::{
     registry::{
         RegistryEntryStatus, append_history_entry, current_bundle_path, current_version,
         global_passphrase_store_key, load_registry, mark_history_entry,
-        previous_successful_bundle_path, save_registry, track_bundle_dir,
+        previous_successful_bundle_path, reset_runvault_root, save_registry, track_bundle_dir,
     },
     run, secure_store,
     vault::{self, VaultDocument, VaultValue},
@@ -204,6 +204,7 @@ impl Runvault {
             Command::Cache(args) => match args.command {
                 CacheSubcommand::Clear(_args) => self.clear_cached_passphrase(),
             },
+            Command::Reset => self.reset_state(),
             Command::Encrypt(args) => {
                 let output_path = self.encrypt_file(&args.input, args.output.as_deref())?;
                 println!("{}", output_path.display());
@@ -422,6 +423,12 @@ impl Runvault {
         secure_store::clear_password(&self.secure_store_key()?)
     }
 
+    pub fn reset_state(&self) -> Result<(), Error> {
+        let secure_store_key = self.secure_store_key()?;
+        secure_store::clear_password(&secure_store_key)?;
+        reset_runvault_root()
+    }
+
     pub fn encrypt_file(
         &self,
         input_path: &Path,
@@ -593,10 +600,8 @@ impl Runvault {
             let vars = apply_prefix(vars, prefix.unwrap_or(""))?;
             for (key, value) in vars {
                 if let Some(reference) = parse_reference_value(&value) {
-                    let mut reference_path = profile::expand_user_home(Path::new(&reference));
-                    if reference_path.is_relative() {
-                        reference_path = input_dir.join(reference_path);
-                    }
+                    let reference_path =
+                        profile::resolve_source_path(Path::new(&reference), &input_dir)?;
                     let spec = if let Some(spec) =
                         referenced_specs.get(&(reference_path.clone(), key.clone()))
                     {
@@ -1175,8 +1180,10 @@ fn apply_file_import_spec(
 }
 
 fn read_profile_source_bytes(path: &Path, password: &SecretString) -> Result<Vec<u8>, Error> {
-    let content = std::fs::read(path).map_err(|source| Error::ReadFile {
-        path: path.to_path_buf(),
+    let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let resolved = profile::resolve_source_path(path, &base_dir)?;
+    let content = std::fs::read(&resolved).map_err(|source| Error::ReadFile {
+        path: resolved,
         source,
     })?;
     Ok(maybe_decrypt_file_payload(&content, password.clone())?.to_vec())

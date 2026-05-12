@@ -12,7 +12,7 @@ use crate::{
     error::Error,
     profile::{
         DEFAULT_PROFILE_FILE, FileCleanup, Profile, ResourceSpec, parse_file_mode,
-        resolve_profile_path, save_profile_to_path,
+        resolve_profile_path, resolve_source_path, save_profile_to_path,
     },
     vault::StoredFileCleanup,
 };
@@ -428,11 +428,7 @@ fn bundle_profile_resources(
     let mut resources = BTreeMap::new();
 
     for (key, spec) in profile.resources().clone() {
-        let source_path = if spec.source_path.is_absolute() {
-            spec.source_path.clone()
-        } else {
-            workdir.join(&spec.source_path)
-        };
+        let source_path = resolve_source_path(&spec.source_path, &workdir)?;
         let content = fs::read(&source_path).map_err(|source| Error::ReadFile {
             path: source_path,
             source,

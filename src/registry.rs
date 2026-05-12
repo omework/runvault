@@ -62,6 +62,17 @@ pub fn registry_path() -> Result<PathBuf, Error> {
     Ok(registry_root()?.join(REGISTRY_FILE_NAME))
 }
 
+pub fn reset_runvault_root() -> Result<(), Error> {
+    let root = runvault_root()?;
+    if root.exists() {
+        fs::remove_dir_all(&root).map_err(|source| Error::WriteFile {
+            path: root.clone(),
+            source,
+        })?;
+    }
+    fs::create_dir_all(&root).map_err(|source| Error::WriteFile { path: root, source })
+}
+
 pub fn track_bundle_dir(track: &str, version: &str) -> Result<PathBuf, Error> {
     validate_registry_segment("track name", track)?;
     validate_registry_segment("bundle version", version)?;
@@ -210,9 +221,12 @@ fn validate_registry_segment(label: &str, value: &str) -> Result<(), Error> {
 mod tests {
     use super::{
         RegistryDocument, RegistryEntryStatus, append_history_entry, current_bundle_path,
-        current_version, mark_history_entry, previous_successful_bundle_path,
+        current_version, mark_history_entry, previous_successful_bundle_path, reset_runvault_root,
     };
-    use std::path::PathBuf;
+    use std::{path::PathBuf, sync::Mutex};
+    use tempfile::tempdir;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn resolves_previous_successful_bundle_by_execution_history() {
@@ -301,5 +315,33 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("path-safe segment"));
+    }
+
+    #[test]
+    fn reset_runvault_root_clears_and_recreates_state_dir() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = tempdir().unwrap();
+        let previous_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", home.path());
+        }
+
+        let root = home.path().join(".runvault");
+        std::fs::create_dir_all(root.join("bundles/demo")).unwrap();
+        std::fs::write(root.join("registry.yaml"), "tracks: {}\n").unwrap();
+        std::fs::write(root.join("bundles/demo/state.txt"), "demo").unwrap();
+
+        reset_runvault_root().unwrap();
+
+        assert!(root.exists());
+        assert!(root.is_dir());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+
+        unsafe {
+            match previous_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
     }
 }

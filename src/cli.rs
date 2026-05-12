@@ -19,6 +19,7 @@ pub enum Command {
     Init(CreateProfileArgs),
     Bundle(BundleArgs),
     Cache(CacheCommand),
+    Reset,
     Encrypt(EncryptArgs),
     Jwt(JwtArgs),
     Set(SetArgs),
@@ -807,6 +808,15 @@ mod tests {
         };
         let PkiSubcommand::Rotate(_args) = args.command else {
             panic!("expected pki rotate subcommand");
+        };
+    }
+
+    #[test]
+    fn reset_parses_without_arguments() {
+        let cli = Cli::try_parse_from(["runvault", "reset"]).unwrap();
+
+        let Command::Reset = cli.command else {
+            panic!("expected reset command");
         };
     }
 

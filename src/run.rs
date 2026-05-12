@@ -15,8 +15,8 @@ use crate::{
     password::prompt_password_once,
     ping::{ping_target_once, ping_targets},
     profile::{
-        FileCleanup, Profile, ensure_default_profile_exists, expand_user_home, parse_file_mode,
-        resolve_profile_path,
+        FileCleanup, Profile, ensure_default_profile_exists, parse_file_mode, resolve_profile_path,
+        resolve_source_path,
     },
     secure_store::{
         clear_password, load_password as load_secure_password, store_password_if_possible,
@@ -278,12 +278,7 @@ fn materialize_profile_resources(
     let mut mounted_files = Vec::new();
 
     for (key, spec) in profile.resources() {
-        let source_path = expand_user_home(&spec.source_path);
-        let resolved_source_path = if source_path.is_absolute() {
-            source_path
-        } else {
-            profile_dir.join(source_path)
-        };
+        let resolved_source_path = resolve_source_path(&spec.source_path, profile_dir)?;
         let raw_content = fs::read(&resolved_source_path).map_err(|source| Error::ReadFile {
             path: resolved_source_path,
             source,

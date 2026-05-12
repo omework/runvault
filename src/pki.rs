@@ -29,6 +29,15 @@ const PKI_SCHEMA_VERSION: u8 = 1;
 const PKI_DIR_NAME: &str = "pki";
 const PKI_INFRA_FILE_NAME: &str = "infra.yaml";
 pub const DEFAULT_ROOT_CA_DAYS: u32 = 3650;
+const PKI_URI_SCHEME: &str = "pki://";
+const PKI_CA_NAME: &str = "ca";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PkiMaterialFile {
+    Key,
+    Cert,
+    Chain,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PkiInitOptions {
@@ -94,6 +103,37 @@ pub fn pki_infra_path() -> Result<PathBuf, Error> {
     Ok(pki_root_dir()?.join(PKI_INFRA_FILE_NAME))
 }
 
+pub fn resolve_pki_uri(path: &Path) -> Result<Option<PathBuf>, Error> {
+    let Some(raw) = path.to_str() else {
+        return Ok(None);
+    };
+    let Some(raw_path) = raw.strip_prefix(PKI_URI_SCHEME) else {
+        return Ok(None);
+    };
+    let segments = raw_path.split('/').collect::<Vec<_>>();
+    let [name, file_name] = segments.as_slice() else {
+        return Err(Error::Pki(format!(
+            "invalid PKI URI '{}'; expected pki://<name>/<key.pem|crt.pem|chain.pem>",
+            raw
+        )));
+    };
+    if name.trim().is_empty() {
+        return Err(Error::Pki(format!(
+            "invalid PKI URI '{}'; certificate name must not be empty",
+            raw
+        )));
+    }
+    let file = parse_pki_material_file(file_name, raw)?;
+    let root = pki_root_dir()?;
+    let resolved = if *name == PKI_CA_NAME {
+        root.join(PKI_CA_NAME).join(file.file_name())
+    } else {
+        validate_leaf_name(name)?;
+        root.join("issued").join(name).join(file.file_name())
+    };
+    Ok(Some(resolved))
+}
+
 pub fn init_infra_pki(password: SecretString, options: &PkiInitOptions) -> Result<PathBuf, Error> {
     let root_dir = pki_root_dir()?;
     init_infra_pki_at(&root_dir, password, options)
@@ -138,9 +178,9 @@ fn init_infra_pki_at(
 ) -> Result<PathBuf, Error> {
     let pki_dir = root_dir.to_path_buf();
     let infra_path = pki_dir.join(PKI_INFRA_FILE_NAME);
-    let root_key_rel = PathBuf::from("ca").join("root").join("root.key.pem");
-    let root_cert_rel = PathBuf::from("ca").join("root").join("root.crt.pem");
-    let root_chain_rel = PathBuf::from("ca").join("root").join("root.chain.pem");
+    let root_key_rel = PathBuf::from("ca").join("key.pem");
+    let root_cert_rel = PathBuf::from("ca").join("crt.pem");
+    let root_chain_rel = PathBuf::from("ca").join("chain.pem");
     let root_key_path = pki_dir.join(&root_key_rel);
     let root_cert_path = pki_dir.join(&root_cert_rel);
     let root_chain_path = pki_dir.join(&root_chain_rel);
@@ -277,15 +317,9 @@ fn issue_infra_certificate_at(
         ));
     }
 
-    let key_rel = PathBuf::from("issued")
-        .join(name)
-        .join(format!("{name}.key.pem"));
-    let cert_rel = PathBuf::from("issued")
-        .join(name)
-        .join(format!("{name}.crt.pem"));
-    let chain_rel = PathBuf::from("issued")
-        .join(name)
-        .join(format!("{name}.chain.pem"));
+    let key_rel = PathBuf::from("issued").join(name).join("key.pem");
+    let cert_rel = PathBuf::from("issued").join(name).join("crt.pem");
+    let chain_rel = PathBuf::from("issued").join(name).join("chain.pem");
     let key_path = pki_dir.join(&key_rel);
     let cert_path = pki_dir.join(&cert_rel);
     let chain_path = pki_dir.join(&chain_rel);
@@ -683,6 +717,11 @@ fn validate_leaf_name(name: &str) -> Result<(), Error> {
             "issued certificate name must not be empty".to_string(),
         ));
     }
+    if name == PKI_CA_NAME {
+        return Err(Error::Pki(
+            "issued certificate name 'ca' is reserved".to_string(),
+        ));
+    }
     let path = Path::new(name);
     if path.components().count() != 1 || path.file_name().is_none() {
         return Err(Error::Pki(format!(
@@ -693,6 +732,28 @@ fn validate_leaf_name(name: &str) -> Result<(), Error> {
     Ok(())
 }
 
+impl PkiMaterialFile {
+    fn file_name(self) -> &'static str {
+        match self {
+            Self::Key => "key.pem",
+            Self::Cert => "crt.pem",
+            Self::Chain => "chain.pem",
+        }
+    }
+}
+
+fn parse_pki_material_file(value: &str, raw_uri: &str) -> Result<PkiMaterialFile, Error> {
+    match value {
+        "key.pem" => Ok(PkiMaterialFile::Key),
+        "crt.pem" => Ok(PkiMaterialFile::Cert),
+        "chain.pem" => Ok(PkiMaterialFile::Chain),
+        _ => Err(Error::Pki(format!(
+            "invalid PKI URI '{}'; filename must be one of key.pem, crt.pem, or chain.pem",
+            raw_uri
+        ))),
+    }
+}
+
 fn pki_error(err: openssl::error::ErrorStack) -> Error {
     Error::Pki(err.to_string())
 }
@@ -701,11 +762,12 @@ fn pki_error(err: openssl::error::ErrorStack) -> Error {
 mod tests {
     use super::{
         DEFAULT_ROOT_CA_DAYS, PkiInitOptions, PkiIssueOptions, init_infra_pki_at,
-        issue_infra_certificate_at, load_infra_document, rotate_infra_certificates_at,
+        issue_infra_certificate_at, load_infra_document, resolve_pki_uri,
+        rotate_infra_certificates_at, validate_leaf_name,
     };
     use crate::error::Error;
     use age::secrecy::SecretString;
-    use std::{net::IpAddr, str::FromStr};
+    use std::{net::IpAddr, path::Path, str::FromStr};
     use tempfile::tempdir;
 
     #[test]
@@ -725,10 +787,10 @@ mod tests {
 
         let infra = load_infra_document(&dir.path().join("infra.yaml")).unwrap();
         assert_eq!(infra.root.common_name, "Runvault Root CA");
-        let root_key = std::fs::read_to_string(root_dir.join("root.key.pem")).unwrap();
+        let root_key = std::fs::read_to_string(root_dir.join("key.pem")).unwrap();
         assert!(root_key.contains("BEGIN ENCRYPTED PRIVATE KEY"));
-        assert!(root_dir.join("root.crt.pem").exists());
-        assert!(root_dir.join("root.chain.pem").exists());
+        assert!(root_dir.join("crt.pem").exists());
+        assert!(root_dir.join("chain.pem").exists());
     }
 
     #[test]
@@ -764,9 +826,9 @@ mod tests {
         let infra = load_infra_document(&dir.path().join("infra.yaml")).unwrap();
         assert_eq!(infra.issued.len(), 1);
         assert_eq!(infra.issued[0].name, "api.service.local");
-        assert!(issued_dir.join("api.service.local.key.pem").exists());
-        assert!(issued_dir.join("api.service.local.crt.pem").exists());
-        assert!(issued_dir.join("api.service.local.chain.pem").exists());
+        assert!(issued_dir.join("key.pem").exists());
+        assert!(issued_dir.join("crt.pem").exists());
+        assert!(issued_dir.join("chain.pem").exists());
     }
 
     #[test]
@@ -798,11 +860,11 @@ mod tests {
             },
         )
         .unwrap();
-        let key_before = std::fs::read(issued_dir.join("service.key.pem")).unwrap();
+        let key_before = std::fs::read(issued_dir.join("key.pem")).unwrap();
 
         rotate_infra_certificates_at(dir.path(), password).unwrap();
 
-        let key_after = std::fs::read(issued_dir.join("service.key.pem")).unwrap();
+        let key_after = std::fs::read(issued_dir.join("key.pem")).unwrap();
         assert_ne!(key_before, key_after);
     }
 
@@ -878,7 +940,7 @@ mod tests {
         assert_eq!(infra.root.common_name, "Runvault Root CA");
         assert_eq!(infra.root.days, DEFAULT_ROOT_CA_DAYS);
         assert_eq!(infra.issued.len(), 1);
-        assert!(issued_dir.join("api.service.local.crt.pem").exists());
+        assert!(issued_dir.join("crt.pem").exists());
     }
 
     #[test]
@@ -923,8 +985,8 @@ mod tests {
             },
         )
         .unwrap();
-        let root_before = std::fs::read(dir.path().join("ca/root/root.crt.pem")).unwrap();
-        let leaf_before = std::fs::read(issued_dir.join("service.crt.pem")).unwrap();
+        let root_before = std::fs::read(dir.path().join("ca/crt.pem")).unwrap();
+        let leaf_before = std::fs::read(issued_dir.join("crt.pem")).unwrap();
 
         init_infra_pki_at(
             dir.path(),
@@ -938,8 +1000,8 @@ mod tests {
         .unwrap();
 
         let infra = load_infra_document(&dir.path().join("infra.yaml")).unwrap();
-        let root_after = std::fs::read(dir.path().join("ca/root/root.crt.pem")).unwrap();
-        let leaf_after = std::fs::read(issued_dir.join("service.crt.pem")).unwrap();
+        let root_after = std::fs::read(dir.path().join("ca/crt.pem")).unwrap();
+        let leaf_after = std::fs::read(issued_dir.join("crt.pem")).unwrap();
 
         assert_eq!(infra.root.common_name, "Replacement Root");
         assert_eq!(infra.issued.len(), 1);
@@ -977,7 +1039,7 @@ mod tests {
             },
         )
         .unwrap();
-        let leaf_before = std::fs::read(issued_dir.join("shared-name.crt.pem")).unwrap();
+        let leaf_before = std::fs::read(issued_dir.join("crt.pem")).unwrap();
 
         issue_infra_certificate_at(
             dir.path(),
@@ -996,7 +1058,7 @@ mod tests {
         .unwrap();
 
         let infra = load_infra_document(&dir.path().join("infra.yaml")).unwrap();
-        let leaf_after = std::fs::read(issued_dir.join("shared-name.crt.pem")).unwrap();
+        let leaf_after = std::fs::read(issued_dir.join("crt.pem")).unwrap();
 
         assert_eq!(infra.issued.len(), 1);
         assert_eq!(infra.issued[0].common_name.as_deref(), Some("replacement"));
@@ -1038,14 +1100,49 @@ mod tests {
         )
         .unwrap();
 
-        let leaf = openssl::x509::X509::from_pem(
-            &std::fs::read(issued_dir.join("caddy-workers.crt.pem")).unwrap(),
-        )
-        .unwrap();
+        let leaf =
+            openssl::x509::X509::from_pem(&std::fs::read(issued_dir.join("crt.pem")).unwrap())
+                .unwrap();
         let san = leaf.subject_alt_names().unwrap();
         assert!(
             san.iter()
                 .any(|name| { name.dnsname() == Some("*.workers.api.mata35.fsb.home") })
         );
+    }
+
+    #[test]
+    fn resolves_pki_uris_for_ca_and_issued_material() {
+        let home = tempdir().unwrap();
+        let previous_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", home.path());
+        }
+
+        let ca = resolve_pki_uri(Path::new("pki://ca/crt.pem"))
+            .unwrap()
+            .expect("expected pki uri resolution");
+        let issued = resolve_pki_uri(Path::new("pki://api.service.local/key.pem"))
+            .unwrap()
+            .expect("expected pki uri resolution");
+
+        assert_eq!(ca, home.path().join(".runvault/pki/ca/crt.pem"));
+        assert_eq!(
+            issued,
+            home.path()
+                .join(".runvault/pki/issued/api.service.local/key.pem")
+        );
+
+        unsafe {
+            match previous_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_reserved_ca_as_issued_name() {
+        let err = validate_leaf_name("ca").unwrap_err();
+        assert!(matches!(err, Error::Pki(_)));
     }
 }

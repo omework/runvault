@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{envfile::validate_env_key, error::Error};
+use crate::{envfile::validate_env_key, error::Error, pki};
 
 pub const DEFAULT_PROFILE_FILE: &str = "runvault.yaml";
 pub const DEFAULT_ENV_FILE: &str = "env.sec";
@@ -382,10 +382,7 @@ pub fn load_file_import_document(path: &Path) -> Result<FileImportDocument, Erro
     validate_file_import_document(&document)?;
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
     for spec in document.files.values_mut() {
-        spec.src = expand_user_home(&spec.src);
-        if spec.src.is_relative() {
-            spec.src = base_dir.join(&spec.src);
-        }
+        spec.src = resolve_source_path(&spec.src, base_dir)?;
     }
     Ok(document)
 }
@@ -403,10 +400,7 @@ pub fn load_resource_import_document(path: &Path) -> Result<ResourceImportDocume
     validate_resource_import_document(&document)?;
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
     for spec in document.resources.values_mut() {
-        spec.src = expand_user_home(&spec.src);
-        if spec.src.is_relative() {
-            spec.src = base_dir.join(&spec.src);
-        }
+        spec.src = resolve_source_path(&spec.src, base_dir)?;
     }
     Ok(document)
 }
@@ -427,6 +421,19 @@ pub fn expand_user_home(path: &Path) -> PathBuf {
             .unwrap_or_else(|| path.to_path_buf());
     }
     path.to_path_buf()
+}
+
+pub fn resolve_source_path(path: &Path, base_dir: &Path) -> Result<PathBuf, Error> {
+    if let Some(resolved) = pki::resolve_pki_uri(path)? {
+        return Ok(resolved);
+    }
+
+    let expanded = expand_user_home(path);
+    if expanded.is_absolute() {
+        Ok(expanded)
+    } else {
+        Ok(base_dir.join(expanded))
+    }
 }
 
 fn validate_file_import_document(document: &FileImportDocument) -> Result<(), Error> {
@@ -503,7 +510,7 @@ mod tests {
         FileCleanup, FileImportDocument, FileSpec, PingTarget, Profile, ResourceImportDocument,
         ResourceSpec, create_profile, ensure_default_profile_exists, expand_user_home,
         load_file_import_document, load_resource_import_document, resolve_profile_path,
-        save_profile_to_path,
+        resolve_source_path, save_profile_to_path,
     };
     use crate::error::Error;
     use std::{
@@ -999,5 +1006,26 @@ resources:
             expand_user_home(Path::new("/tmp/secret.txt")),
             PathBuf::from("/tmp/secret.txt")
         );
+    }
+
+    #[test]
+    fn resolves_pki_uri_source_paths() {
+        let home = tempdir().unwrap();
+        let previous_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", home.path());
+        }
+
+        let resolved =
+            resolve_source_path(Path::new("pki://ca/crt.pem"), Path::new("/unused")).unwrap();
+
+        assert_eq!(resolved, home.path().join(".runvault/pki/ca/crt.pem"));
+
+        unsafe {
+            match previous_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
     }
 }
