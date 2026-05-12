@@ -1,3 +1,4 @@
+pub mod app;
 pub mod bundle;
 pub mod cli;
 pub mod crypto;
@@ -12,3 +13,5 @@ pub mod registry;
 pub mod run;
 pub mod secure_store;
 pub mod vault;
+
+pub use app::{RevealedFile, RevealedValue, Runvault, SecretSource, SecretUpdate};

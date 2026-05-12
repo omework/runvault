@@ -4,6 +4,46 @@
 
 It keeps the profile metadata in plaintext, keeps the env payload encrypted on disk, decrypts only in memory, and launches a target command with the resolved environment.
 
+## Library usage
+
+`runvault` can now be embedded as a crate through the `Runvault` facade. The CLI binary uses that same facade from `src/main.rs`, so library and CLI behavior stay aligned.
+
+```rust
+use runvault::{
+    profile::FileCleanup,
+    Runvault, SecretUpdate,
+};
+
+#[tokio::main]
+async fn main() -> Result<(), runvault::error::Error> {
+    let runvault = Runvault::new().with_default_profile("deployments/ovh/services");
+
+    runvault.set_secret(
+        None,
+        SecretUpdate::plain_text("DATABASE_URL", "postgres://db")
+            .with_target_path(".runvault/database-url")
+            .with_mode(0o600)
+            .with_cleanup(FileCleanup::Keep),
+    )?;
+
+    runvault.run_profile(runvault.default_profile()).await
+}
+```
+
+For parsed CLI reuse from another binary or integration point:
+
+```rust
+use runvault::Runvault;
+
+#[tokio::main]
+async fn main() {
+    if let Err(err) = Runvault::default().run_cli_env().await {
+        eprintln!("{err}");
+        std::process::exit(1);
+    }
+}
+```
+
 The default folder model is:
 
 ```text

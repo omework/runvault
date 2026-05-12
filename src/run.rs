@@ -18,7 +18,6 @@ use crate::{
         FileCleanup, Profile, ensure_default_profile_exists, expand_user_home, parse_file_mode,
         resolve_profile_path,
     },
-    registry::global_passphrase_store_key,
     secure_store::{
         clear_password, load_password as load_secure_password, store_password_if_possible,
     },
@@ -160,10 +159,9 @@ pub async fn ping_profile(profile_path: &Path) -> Result<(), Error> {
 fn load_profile_env_prompt(
     profile: &Profile,
     profile_path: &Path,
-    _secure_store_key: &Path,
+    secure_store_key: &Path,
     execution_dir: &Path,
 ) -> Result<LoadedProfileEnv, Error> {
-    let secure_store_key = global_passphrase_store_key()?;
     if let Some(password) = load_secure_password(&secure_store_key)? {
         match load_profile_env_with_password(profile, profile_path, password.clone(), execution_dir)
         {
