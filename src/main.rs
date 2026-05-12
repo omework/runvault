@@ -9,7 +9,10 @@ use runvault::{
     error::Error,
     jwt::{JwtOptions, generate_hs256, generate_signing_secret, parse_ttl_seconds},
     password::{prompt_password_confirm, prompt_password_once},
-    pki::{PkiInitOptions, PkiIssueOptions, init_profile_pki, issue_profile_certificate},
+    pki::{
+        PkiInitOptions, PkiIssueOptions, init_infra_pki, issue_infra_certificate,
+        rotate_infra_certificates,
+    },
     profile::{
         CreateProfileOptions, FileCleanup, FileImportSpec, FileSpec, PingTarget, Profile,
         ResourceImportSpec, ResourceSpec, create_profile, ensure_default_profile_exists,
@@ -18,13 +21,12 @@ use runvault::{
     },
     registry::{
         RegistryEntryStatus, append_history_entry, current_bundle_path, current_version,
-        load_registry, mark_history_entry, previous_successful_bundle_path, save_registry,
-        track_bundle_dir,
+        global_passphrase_store_key, load_registry, mark_history_entry,
+        previous_successful_bundle_path, save_registry, track_bundle_dir,
     },
     run::{ping_profile, run_profile, run_profile_with_secure_store_key_in_dir},
     secure_store::{
-        clear_all_passwords, clear_password, load_password as load_secure_password,
-        store_password_if_possible,
+        clear_password, load_password as load_secure_password, store_password_if_possible,
     },
     vault::{
         VaultDocument, VaultValue, load_vault_for_update_with_password, load_vault_with_password,
@@ -86,13 +88,9 @@ async fn run() -> Result<(), Error> {
         }
         Command::Cache(args) => match args.command {
             CacheSubcommand::Clear(args) => {
-                if let Some(profile) = args.profile {
-                    clear_password(&resolve_profile_path(&profile))
-                } else if let Some(profile) = global_profile {
-                    clear_password(&resolve_profile_path(profile))
-                } else {
-                    clear_all_passwords()
-                }
+                let _ = args.profile;
+                let _ = global_profile;
+                clear_password(&global_passphrase_store_key()?)
             }
         },
         Command::Encrypt(args) => {
@@ -232,15 +230,8 @@ async fn run() -> Result<(), Error> {
         }
         Command::Pki(args) => match args.command {
             PkiSubcommand::Init(args) => {
-                let profile_input = global_profile
-                    .cloned()
-                    .unwrap_or_else(|| PathBuf::from(runvault::profile::DEFAULT_PROFILE_DIR));
-                ensure_default_profile_exists(&profile_input)?;
-                let profile_path = resolve_profile_path(&profile_input);
-                let profile = Profile::from_path(&profile_path)?;
-                let password = load_profile_secret_password(&profile, &profile_path, true)?;
-                let created = init_profile_pki(
-                    &profile_path,
+                let password = load_pki_secret_password(true)?;
+                let created = init_infra_pki(
                     password,
                     &PkiInitOptions {
                         common_name: args.common_name,
@@ -251,13 +242,7 @@ async fn run() -> Result<(), Error> {
                 Ok(())
             }
             PkiSubcommand::Issue(args) => {
-                let profile_input = global_profile
-                    .cloned()
-                    .unwrap_or_else(|| PathBuf::from(runvault::profile::DEFAULT_PROFILE_DIR));
-                ensure_default_profile_exists(&profile_input)?;
-                let profile_path = resolve_profile_path(&profile_input);
-                let profile = Profile::from_path(&profile_path)?;
-                let password = load_profile_secret_password(&profile, &profile_path, false)?;
+                let password = load_pki_secret_password(false)?;
                 let ip_addrs = args
                     .ip_addrs
                     .into_iter()
@@ -267,8 +252,7 @@ async fn run() -> Result<(), Error> {
                             .map_err(|_| Error::Pki(format!("invalid IP address '{}'", value)))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let created = issue_profile_certificate(
-                    &profile_path,
+                let created = issue_infra_certificate(
                     password,
                     &args.name,
                     &PkiIssueOptions {
@@ -281,6 +265,12 @@ async fn run() -> Result<(), Error> {
                     },
                 )?;
                 println!("{}", created.display());
+                Ok(())
+            }
+            PkiSubcommand::Rotate(_) => {
+                let password = load_pki_secret_password(false)?;
+                rotate_infra_certificates(password)?;
+                println!("rotated tracked PKI leaf certificates");
                 Ok(())
             }
         },
@@ -646,7 +636,8 @@ fn stage_bundle_for_track(
 async fn execute_bundle_at_path(bundle_path: &Path, bundle_dir: &Path) -> Result<(), Error> {
     let bundle = load_bundle(bundle_path)?;
     let profile_path = materialize_bundle_into(bundle_dir, &bundle)?;
-    run_profile_with_secure_store_key_in_dir(&profile_path, &profile_path, bundle_dir).await
+    let secure_store_key = global_passphrase_store_key()?;
+    run_profile_with_secure_store_key_in_dir(&profile_path, &secure_store_key, bundle_dir).await
 }
 
 fn bundle_version(bundle: &BundleDocument) -> Result<String, Error> {
@@ -766,14 +757,15 @@ fn load_vault_with_lazy_password(
     profile: &Profile,
     profile_path: &PathBuf,
 ) -> Result<(VaultDocument, age::secrecy::SecretString), Error> {
-    if let Some(password) = load_secure_password(profile_path)? {
+    let secure_store_key = global_passphrase_store_key()?;
+    if let Some(password) = load_secure_password(&secure_store_key)? {
         match load_vault_with_password(profile, profile_path, password.clone()) {
             Ok(vault) => {
-                store_password_if_possible(profile_path, &password)?;
+                store_password_if_possible(&secure_store_key, &password)?;
                 return Ok((vault, password));
             }
             Err(Error::Decryption(_)) => {
-                clear_password(profile_path)?;
+                clear_password(&secure_store_key)?;
             }
             Err(err) => return Err(err),
         }
@@ -781,38 +773,17 @@ fn load_vault_with_lazy_password(
 
     let password = prompt_password_once()?;
     let vault = load_vault_with_password(profile, profile_path, password.clone())?;
-    store_password_if_possible(profile_path, &password)?;
+    store_password_if_possible(&secure_store_key, &password)?;
     Ok((vault, password))
 }
 
-fn load_profile_secret_password(
-    profile: &Profile,
-    profile_path: &PathBuf,
+fn load_pki_secret_password(
     confirm_if_uncached: bool,
 ) -> Result<age::secrecy::SecretString, Error> {
-    let env_path = profile.resolve_env_path(profile_path);
-    if env_path.exists() {
-        if let Some(password) = load_secure_password(profile_path)? {
-            match load_vault_with_password(profile, profile_path, password.clone()) {
-                Ok(_) => {
-                    store_password_if_possible(profile_path, &password)?;
-                    return Ok(password);
-                }
-                Err(Error::Decryption(_)) => {
-                    clear_password(profile_path)?;
-                }
-                Err(err) => return Err(err),
-            }
-        }
+    let secure_store_key = global_passphrase_store_key()?;
 
-        let password = prompt_password_once()?;
-        load_vault_with_password(profile, profile_path, password.clone())?;
-        store_password_if_possible(profile_path, &password)?;
-        return Ok(password);
-    }
-
-    if let Some(password) = load_secure_password(profile_path)? {
-        store_password_if_possible(profile_path, &password)?;
+    if let Some(password) = load_secure_password(&secure_store_key)? {
+        store_password_if_possible(&secure_store_key, &password)?;
         return Ok(password);
     }
 
@@ -821,7 +792,7 @@ fn load_profile_secret_password(
     } else {
         prompt_password_once()?
     };
-    store_password_if_possible(profile_path, &password)?;
+    store_password_if_possible(&secure_store_key, &password)?;
     Ok(password)
 }
 
@@ -829,14 +800,15 @@ fn load_vault_with_lazy_password_for_update(
     profile: &Profile,
     profile_path: &PathBuf,
 ) -> Result<(VaultDocument, age::secrecy::SecretString), Error> {
-    if let Some(password) = load_secure_password(profile_path)? {
+    let secure_store_key = global_passphrase_store_key()?;
+    if let Some(password) = load_secure_password(&secure_store_key)? {
         match load_vault_for_update_with_password(profile, profile_path, password.clone()) {
             Ok(vault) => {
-                store_password_if_possible(profile_path, &password)?;
+                store_password_if_possible(&secure_store_key, &password)?;
                 return Ok((vault, password));
             }
             Err(Error::Decryption(_)) => {
-                clear_password(profile_path)?;
+                clear_password(&secure_store_key)?;
             }
             Err(err) => return Err(err),
         }
@@ -844,17 +816,18 @@ fn load_vault_with_lazy_password_for_update(
 
     let password = prompt_password_once()?;
     let vault = load_vault_for_update_with_password(profile, profile_path, password.clone())?;
-    store_password_if_possible(profile_path, &password)?;
+    store_password_if_possible(&secure_store_key, &password)?;
     Ok((vault, password))
 }
 
-fn password_for_new_vault(profile_path: &PathBuf) -> Result<age::secrecy::SecretString, Error> {
-    if let Some(password) = load_secure_password(profile_path)? {
-        store_password_if_possible(profile_path, &password)?;
+fn password_for_new_vault(_profile_path: &PathBuf) -> Result<age::secrecy::SecretString, Error> {
+    let secure_store_key = global_passphrase_store_key()?;
+    if let Some(password) = load_secure_password(&secure_store_key)? {
+        store_password_if_possible(&secure_store_key, &password)?;
         return Ok(password);
     }
     let password = prompt_password_confirm()?;
-    store_password_if_possible(profile_path, &password)?;
+    store_password_if_possible(&secure_store_key, &password)?;
     Ok(password)
 }
 

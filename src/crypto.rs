@@ -19,8 +19,10 @@ use crate::error::Error;
 pub const DEFAULT_VAULT_PBKDF2_ROUNDS: u32 = 100_000;
 pub const VAULT_KDF_SALT_LEN: usize = 16;
 pub const VAULT_NONCE_LEN: usize = 12;
+pub const VAULT_KEY_LEN: usize = 32;
 const ENCRYPTED_FILE_MAGIC: &[u8] = b"RUNVAULT-ENC-FILE\n";
 const ENCRYPTED_PRIVATE_KEY_PEM_MAGIC: &[u8] = b"-----BEGIN ENCRYPTED PRIVATE KEY-----";
+const PROFILE_KEY_AAD: &[u8] = b"kind=profile_key\n";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultCryptoConfig {
@@ -43,17 +45,27 @@ impl VaultCryptoConfig {
 }
 
 impl VaultCipher {
+    pub fn from_key_bytes(key_bytes: &[u8]) -> Result<Self, Error> {
+        if key_bytes.len() != VAULT_KEY_LEN {
+            return Err(Error::Encryption(format!(
+                "vault key must be exactly {} bytes",
+                VAULT_KEY_LEN
+            )));
+        }
+        let key = UnboundKey::new(&AES_256_GCM, key_bytes)
+            .map_err(|_| Error::Encryption("failed to initialize AES-256-GCM key".to_string()))?;
+        Ok(Self {
+            key: LessSafeKey::new(key),
+        })
+    }
+
     pub fn derive(password: &SecretString, config: &VaultCryptoConfig) -> Result<Self, Error> {
         let key_bytes = pbkdf2_hmac_array::<Sha256, 32>(
             password.expose_secret().as_bytes(),
             &config.salt,
             config.pbkdf2_rounds,
         );
-        let key = UnboundKey::new(&AES_256_GCM, &key_bytes)
-            .map_err(|_| Error::Encryption("failed to initialize AES-256-GCM key".to_string()))?;
-        Ok(Self {
-            key: LessSafeKey::new(key),
-        })
+        Self::from_key_bytes(&key_bytes)
     }
 
     pub fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> Result<EncryptedPayload, Error> {
@@ -90,6 +102,35 @@ impl VaultCipher {
 pub struct EncryptedPayload {
     pub nonce: [u8; VAULT_NONCE_LEN],
     pub ciphertext: Vec<u8>,
+}
+
+pub fn generate_profile_key() -> [u8; VAULT_KEY_LEN] {
+    rand::random()
+}
+
+pub fn wrap_profile_key(
+    password: &SecretString,
+    config: &VaultCryptoConfig,
+    profile_key: &[u8],
+) -> Result<EncryptedPayload, Error> {
+    let cipher = VaultCipher::derive(password, config)?;
+    cipher.encrypt(profile_key, PROFILE_KEY_AAD)
+}
+
+pub fn unwrap_profile_key(
+    password: &SecretString,
+    config: &VaultCryptoConfig,
+    payload: &EncryptedPayload,
+) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let cipher = VaultCipher::derive(password, config)?;
+    let key = cipher.decrypt(payload, PROFILE_KEY_AAD)?;
+    if key.len() != VAULT_KEY_LEN {
+        return Err(Error::Decryption(format!(
+            "wrapped profile key must be exactly {} bytes",
+            VAULT_KEY_LEN
+        )));
+    }
+    Ok(key)
 }
 
 pub fn encrypt_env(plaintext: &[u8], password: SecretString) -> Result<Vec<u8>, Error> {
@@ -175,9 +216,11 @@ pub fn maybe_decrypt_file_payload(
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_VAULT_PBKDF2_ROUNDS, EncryptedPayload, VAULT_KDF_SALT_LEN, VaultCipher,
-        VaultCryptoConfig, decrypt_env, decrypt_file_payload, encrypt_env, encrypt_file_payload,
-        is_encrypted_file_payload, is_encrypted_private_key_pem, maybe_decrypt_file_payload,
+        DEFAULT_VAULT_PBKDF2_ROUNDS, EncryptedPayload, VAULT_KDF_SALT_LEN, VAULT_KEY_LEN,
+        VaultCipher, VaultCryptoConfig, decrypt_env, decrypt_file_payload, encrypt_env,
+        encrypt_file_payload, generate_profile_key, is_encrypted_file_payload,
+        is_encrypted_private_key_pem, maybe_decrypt_file_payload, unwrap_profile_key,
+        wrap_profile_key,
     };
     use age::secrecy::{ExposeSecret, SecretString};
     use openssl::{pkey::PKey, rsa::Rsa, symm::Cipher};
@@ -289,5 +332,19 @@ mod tests {
             )
             .unwrap_err();
         assert!(err.to_string().contains("decryption failed"));
+    }
+
+    #[test]
+    fn wraps_and_unwraps_profile_key() {
+        let config = VaultCryptoConfig {
+            salt: [9; VAULT_KDF_SALT_LEN],
+            pbkdf2_rounds: DEFAULT_VAULT_PBKDF2_ROUNDS,
+        };
+        let password = SecretString::from("correct horse battery staple".to_string());
+        let profile_key = generate_profile_key();
+        let wrapped = wrap_profile_key(&password, &config, &profile_key).unwrap();
+        let unwrapped = unwrap_profile_key(&password, &config, &wrapped).unwrap();
+        assert_eq!(&*unwrapped, profile_key.as_slice());
+        assert_eq!(unwrapped.len(), VAULT_KEY_LEN);
     }
 }

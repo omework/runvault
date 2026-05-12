@@ -10,6 +10,7 @@ use crate::error::Error;
 const REGISTRY_DIR_NAME: &str = ".runvault";
 const REGISTRY_FILE_NAME: &str = "registry.yaml";
 const BUNDLES_DIR_NAME: &str = "bundles";
+const GLOBAL_PASSPHRASE_STORE_FILE_NAME: &str = "global-passphrase";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RegistryDocument {
@@ -42,11 +43,19 @@ pub enum RegistryEntryStatus {
     Failed,
 }
 
-pub fn registry_root() -> Result<PathBuf, Error> {
+pub fn runvault_root() -> Result<PathBuf, Error> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .map(|path| path.join(REGISTRY_DIR_NAME))
         .ok_or_else(|| Error::Registry("HOME is not set; cannot resolve ~/.runvault".to_string()))
+}
+
+pub fn global_passphrase_store_key() -> Result<PathBuf, Error> {
+    Ok(runvault_root()?.join(GLOBAL_PASSPHRASE_STORE_FILE_NAME))
+}
+
+pub fn registry_root() -> Result<PathBuf, Error> {
+    runvault_root()
 }
 
 pub fn registry_path() -> Result<PathBuf, Error> {

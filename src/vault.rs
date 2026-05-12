@@ -8,7 +8,10 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    crypto::{EncryptedPayload, VaultCipher, VaultCryptoConfig, decrypt_env},
+    crypto::{
+        EncryptedPayload, VaultCipher, VaultCryptoConfig, decrypt_env, generate_profile_key,
+        unwrap_profile_key, wrap_profile_key,
+    },
     envfile::{parse_env_bytes, validate_env_key},
     error::Error,
     profile::{FileCleanup, Profile},
@@ -30,6 +33,7 @@ pub enum VaultValue {
 pub struct VaultDocument {
     entries: BTreeMap<String, VaultValue>,
     visible_crypto: Option<VisibleVaultCryptoMetadata>,
+    visible_wrapped_key: Option<VisibleVaultWrappedKeyMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +42,8 @@ struct VisibleVaultDocument {
     version: u8,
     #[serde(default)]
     crypto: Option<VisibleVaultCryptoMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wrapped_profile_key: Option<VisibleVaultWrappedKeyMetadata>,
     #[serde(default)]
     entries: BTreeMap<String, VisibleVaultValue>,
 }
@@ -71,6 +77,12 @@ struct VisibleVaultCryptoMetadata {
     pbkdf2_rounds: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct VisibleVaultWrappedKeyMetadata {
+    enc_base64: String,
+    nonce_base64: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct LegacyStoredVaultDocument {
     #[serde(default = "default_legacy_vault_version")]
@@ -96,7 +108,7 @@ enum LegacyStoredVaultValue {
 }
 
 fn default_visible_vault_version() -> u8 {
-    3
+    4
 }
 
 fn default_legacy_vault_version() -> u8 {
@@ -203,6 +215,10 @@ impl VaultDocument {
     fn visible_crypto(&self) -> Option<&VisibleVaultCryptoMetadata> {
         self.visible_crypto.as_ref()
     }
+
+    fn visible_wrapped_key(&self) -> Option<&VisibleVaultWrappedKeyMetadata> {
+        self.visible_wrapped_key.as_ref()
+    }
 }
 
 pub fn load_vault_with_password(
@@ -284,6 +300,7 @@ fn parse_legacy_vault_bytes(input: &[u8]) -> Result<VaultDocument, Error> {
                     .map(|(key, value)| (key, VaultValue::PlainText(value)))
                     .collect(),
                 visible_crypto: None,
+                visible_wrapped_key: None,
             })
         }
     }
@@ -304,7 +321,8 @@ fn serialize_visible_vault_bytes(
         .entries
         .values()
         .any(|value| !matches!(value, VaultValue::SealedVisible(_)));
-    let crypto = if needs_aead {
+    let uses_wrapped_profile_key = needs_aead;
+    let crypto = if uses_wrapped_profile_key {
         Some(
             vault
                 .visible_crypto()
@@ -314,15 +332,30 @@ fn serialize_visible_vault_bytes(
     } else {
         vault.visible_crypto().cloned()
     };
-    let cipher = if needs_aead {
-        Some(VaultCipher::derive(
+    let profile_key = if uses_wrapped_profile_key {
+        if let (Some(crypto), Some(wrapped)) = (crypto.as_ref(), vault.visible_wrapped_key()) {
+            unwrap_visible_profile_key(crypto, wrapped, &password)?.to_vec()
+        } else {
+            generate_profile_key().to_vec()
+        }
+    } else {
+        Vec::new()
+    };
+    let cipher = if uses_wrapped_profile_key {
+        Some(VaultCipher::from_key_bytes(&profile_key)?)
+    } else {
+        None
+    };
+    let wrapped_profile_key = if uses_wrapped_profile_key {
+        Some(visible_vault_wrapped_key_metadata(&wrap_profile_key(
             &password,
             &visible_vault_crypto_config(crypto.as_ref().ok_or_else(|| {
                 Error::VaultFormat("missing visible vault crypto config".to_string())
             })?)?,
-        )?)
+            &profile_key,
+        )?))
     } else {
-        None
+        vault.visible_wrapped_key().cloned()
     };
 
     let entries = vault
@@ -377,12 +410,15 @@ fn serialize_visible_vault_bytes(
         .collect::<Result<BTreeMap<_, _>, Error>>()?;
 
     let stored = VisibleVaultDocument {
-        version: if crypto.is_some() {
+        version: if wrapped_profile_key.is_some() {
             default_visible_vault_version()
+        } else if crypto.is_some() {
+            3
         } else {
             2
         },
         crypto,
+        wrapped_profile_key,
         entries,
     };
 
@@ -402,7 +438,13 @@ fn from_visible_vault(
         )));
     }
 
-    let cipher = visible_vault_cipher(stored.crypto.as_ref(), &password)?;
+    let wrapped_profile_key = stored.wrapped_profile_key.clone();
+    let cipher = visible_vault_cipher(
+        stored.version,
+        stored.crypto.as_ref(),
+        wrapped_profile_key.as_ref(),
+        &password,
+    )?;
     let mut entries = BTreeMap::new();
     for (key, value) in stored.entries {
         validate_key(&key)?;
@@ -413,6 +455,7 @@ fn from_visible_vault(
     Ok(VaultDocument {
         entries,
         visible_crypto: stored.crypto,
+        visible_wrapped_key: wrapped_profile_key,
     })
 }
 
@@ -427,7 +470,13 @@ fn from_visible_vault_for_update(
         )));
     }
 
-    let cipher = visible_vault_cipher(stored.crypto.as_ref(), &password)?;
+    let wrapped_profile_key = stored.wrapped_profile_key.clone();
+    let cipher = visible_vault_cipher(
+        stored.version,
+        stored.crypto.as_ref(),
+        wrapped_profile_key.as_ref(),
+        &password,
+    )?;
     let mut entries = BTreeMap::new();
     let mut validated_password = stored.entries.is_empty();
 
@@ -443,6 +492,7 @@ fn from_visible_vault_for_update(
     Ok(VaultDocument {
         entries,
         visible_crypto: stored.crypto,
+        visible_wrapped_key: wrapped_profile_key,
     })
 }
 
@@ -623,6 +673,7 @@ fn from_legacy_vault(stored: LegacyStoredVaultDocument) -> Result<VaultDocument,
     Ok(VaultDocument {
         entries,
         visible_crypto: None,
+        visible_wrapped_key: None,
     })
 }
 
@@ -635,7 +686,7 @@ fn validate_key(key: &str) -> Result<(), Error> {
 }
 
 fn is_supported_visible_vault_version(version: u8) -> bool {
-    matches!(version, 2 | 3)
+    matches!(version, 2 | 3 | 4)
 }
 
 fn visible_vault_crypto_metadata(config: &VaultCryptoConfig) -> VisibleVaultCryptoMetadata {
@@ -670,12 +721,50 @@ fn visible_vault_crypto_config(
 }
 
 fn visible_vault_cipher(
+    version: u8,
     metadata: Option<&VisibleVaultCryptoMetadata>,
+    wrapped_key: Option<&VisibleVaultWrappedKeyMetadata>,
     password: &SecretString,
 ) -> Result<Option<VaultCipher>, Error> {
-    metadata
-        .map(|metadata| VaultCipher::derive(password, &visible_vault_crypto_config(metadata)?))
-        .transpose()
+    match version {
+        4 => {
+            let metadata = metadata.ok_or_else(|| {
+                Error::VaultFormat("visible vault version 4 requires crypto metadata".to_string())
+            })?;
+            let wrapped_key = wrapped_key.ok_or_else(|| {
+                Error::VaultFormat(
+                    "visible vault version 4 requires wrapped profile key metadata".to_string(),
+                )
+            })?;
+            let profile_key = unwrap_visible_profile_key(metadata, wrapped_key, password)?;
+            Ok(Some(VaultCipher::from_key_bytes(&profile_key)?))
+        }
+        _ => metadata
+            .map(|metadata| VaultCipher::derive(password, &visible_vault_crypto_config(metadata)?))
+            .transpose(),
+    }
+}
+
+fn visible_vault_wrapped_key_metadata(
+    payload: &EncryptedPayload,
+) -> VisibleVaultWrappedKeyMetadata {
+    VisibleVaultWrappedKeyMetadata {
+        enc_base64: STANDARD.encode(&payload.ciphertext),
+        nonce_base64: STANDARD.encode(payload.nonce),
+    }
+}
+
+fn unwrap_visible_profile_key(
+    crypto: &VisibleVaultCryptoMetadata,
+    wrapped_key: &VisibleVaultWrappedKeyMetadata,
+    password: &SecretString,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, Error> {
+    let payload = encrypted_payload_from_fields(
+        "wrapped_profile_key",
+        wrapped_key.enc_base64.clone(),
+        &wrapped_key.nonce_base64,
+    )?;
+    unwrap_profile_key(password, &visible_vault_crypto_config(crypto)?, &payload)
 }
 
 fn encrypted_payload_from_fields(
@@ -776,8 +865,9 @@ run:
         assert!(env_path.exists());
 
         let visible = std::fs::read_to_string(&env_path).unwrap();
-        assert!(visible.contains("version: 3"));
+        assert!(visible.contains("version: 4"));
         assert!(visible.contains("crypto:"));
+        assert!(visible.contains("wrapped_profile_key:"));
         assert!(visible.contains("salt_base64:"));
         assert!(visible.contains("nonce_base64:"));
         assert!(visible.contains("API_KEY:"));
@@ -907,6 +997,7 @@ entries:
         let visible = VisibleVaultDocument {
             version: 2,
             crypto: None,
+            wrapped_profile_key: None,
             entries: BTreeMap::from([(
                 "SECRET".to_string(),
                 VisibleVaultValue::PlainText {
@@ -964,6 +1055,7 @@ run:
         let visible = VisibleVaultDocument {
             version: 2,
             crypto: None,
+            wrapped_profile_key: None,
             entries: BTreeMap::from([
                 (
                     "SECRET".to_string(),
@@ -1002,8 +1094,9 @@ run:
                 nonce_base64: None,
             })
         );
-        assert_eq!(saved.version, 3);
+        assert_eq!(saved.version, 4);
         assert!(saved.crypto.is_some());
+        assert!(saved.wrapped_profile_key.is_some());
 
         let loaded = load_vault_with_password(&profile, &profile_path, password).unwrap();
         assert_eq!(

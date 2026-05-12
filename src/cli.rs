@@ -147,6 +147,7 @@ pub struct PkiCommand {
 pub enum PkiSubcommand {
     Init(PkiInitArgs),
     Issue(PkiIssueArgs),
+    Rotate(PkiRotateArgs),
 }
 
 #[derive(Debug, Args)]
@@ -159,6 +160,7 @@ pub struct PkiInitArgs {
 
 #[derive(Debug, Args)]
 pub struct PkiIssueArgs {
+    #[arg(long, value_name = "NAME")]
     pub name: String,
     #[arg(long = "common-name", value_name = "NAME")]
     pub common_name: Option<String>,
@@ -173,6 +175,9 @@ pub struct PkiIssueArgs {
     #[arg(long, default_value_t = 825)]
     pub days: u32,
 }
+
+#[derive(Debug, Args)]
+pub struct PkiRotateArgs {}
 
 #[derive(Debug, Subcommand)]
 pub enum ImportSubcommand {
@@ -762,6 +767,7 @@ mod tests {
             "runvault",
             "pki",
             "issue",
+            "--name",
             "api.service.local",
             "--dns",
             "api.service.local",
@@ -782,6 +788,18 @@ mod tests {
         assert_eq!(args.ip_addrs, vec!["127.0.0.1"]);
         assert!(args.server);
         assert!(!args.client);
+    }
+
+    #[test]
+    fn pki_rotate_parses_without_profile() {
+        let cli = Cli::try_parse_from(["runvault", "pki", "rotate"]).unwrap();
+
+        let Command::Pki(args) = cli.command else {
+            panic!("expected pki command");
+        };
+        let PkiSubcommand::Rotate(_args) = args.command else {
+            panic!("expected pki rotate subcommand");
+        };
     }
 
     #[test]

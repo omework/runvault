@@ -18,7 +18,7 @@ use crate::{
 };
 
 const BUNDLE_SCHEMA_VERSION: u8 = 1;
-const VISIBLE_VAULT_VERSION: u8 = 3;
+const VISIBLE_VAULT_VERSION: u8 = 4;
 const BUNDLE_DEFAULT_FILE_MODE: &str = "0600";
 const VISIBLE_VAULT_DEFAULT_FILE_MODE: u32 = 0o600;
 const VISIBLE_VAULT_DEFAULT_CIPHER: &str = "aes_256_gcm";
@@ -35,6 +35,8 @@ pub struct BundleDocument {
     pub profile: Profile,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_vault_crypto: Option<VisibleVaultCryptoMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_vault_wrapped_key: Option<VisibleVaultWrappedKeyMetadata>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, BundledEnvEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -79,6 +81,12 @@ pub struct VisibleVaultCryptoMetadata {
     pub salt_base64: String,
     #[serde(default = "default_visible_vault_pbkdf2_rounds")]
     pub pbkdf2_rounds: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VisibleVaultWrappedKeyMetadata {
+    pub enc_base64: String,
+    pub nonce_base64: String,
 }
 
 #[derive(Debug, Clone)]
@@ -144,7 +152,8 @@ pub fn export_bundle(
     normalize_profile_bundle_paths(&mut profile);
 
     let visible_vault = parse_visible_vault_payload(&env_payload)?;
-    let (visible_vault_crypto, env, files) = split_visible_vault_entries(visible_vault)?;
+    let (visible_vault_crypto, visible_vault_wrapped_key, env, files) =
+        split_visible_vault_entries(visible_vault)?;
     let resources = bundle_profile_resources(&mut profile, &profile_path)?;
 
     let bundle = BundleDocument {
@@ -153,6 +162,7 @@ pub fn export_bundle(
         description: options.description.clone(),
         profile,
         visible_vault_crypto,
+        visible_vault_wrapped_key,
         env,
         files,
         resources,
@@ -300,6 +310,8 @@ struct VisibleVaultDocument {
     version: u8,
     #[serde(default)]
     crypto: Option<VisibleVaultCryptoMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wrapped_profile_key: Option<VisibleVaultWrappedKeyMetadata>,
     #[serde(default)]
     entries: BTreeMap<String, VisibleVaultValue>,
 }
@@ -351,6 +363,7 @@ fn split_visible_vault_entries(
 ) -> Result<
     (
         Option<VisibleVaultCryptoMetadata>,
+        Option<VisibleVaultWrappedKeyMetadata>,
         BTreeMap<String, BundledEnvEntry>,
         BTreeMap<String, BundledFileEntry>,
     ),
@@ -404,7 +417,7 @@ fn split_visible_vault_entries(
         }
     }
 
-    Ok((visible.crypto, env, files))
+    Ok((visible.crypto, visible.wrapped_profile_key, env, files))
 }
 
 fn bundle_profile_resources(
@@ -569,6 +582,11 @@ fn serialize_visible_vault_payload_from_bundle(bundle: &BundleDocument) -> Resul
                 .to_string(),
         ));
     }
+    if bundle.visible_vault_wrapped_key.is_some() && bundle.visible_vault_crypto.is_none() {
+        return Err(Error::InvalidBundle(
+            "bundle contains a wrapped profile key but is missing visible_vault_crypto".to_string(),
+        ));
+    }
 
     for (key, value) in &bundle.env {
         entries.insert(
@@ -599,12 +617,15 @@ fn serialize_visible_vault_payload_from_bundle(bundle: &BundleDocument) -> Resul
     }
 
     serde_yaml::to_string(&VisibleVaultDocument {
-        version: if bundle.visible_vault_crypto.is_some() {
+        version: if bundle.visible_vault_wrapped_key.is_some() {
             default_visible_vault_version()
+        } else if bundle.visible_vault_crypto.is_some() {
+            3
         } else {
             2
         },
         crypto: bundle.visible_vault_crypto.clone(),
+        wrapped_profile_key: bundle.visible_vault_wrapped_key.clone(),
         entries,
     })
     .map(|yaml| yaml.into_bytes())
@@ -612,7 +633,7 @@ fn serialize_visible_vault_payload_from_bundle(bundle: &BundleDocument) -> Resul
 }
 
 fn is_supported_visible_vault_version(version: u8) -> bool {
-    matches!(version, 2 | 3)
+    matches!(version, 2 | 3 | 4)
 }
 
 #[cfg(test)]

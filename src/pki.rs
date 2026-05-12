@@ -15,15 +15,19 @@ use openssl::{
         },
     },
 };
+use serde::{Deserialize, Serialize};
 use std::{
     net::IpAddr,
     path::{Path, PathBuf},
 };
 
-use crate::{crypto::maybe_decrypt_file_payload, error::Error, profile::Profile};
+use crate::{crypto::maybe_decrypt_file_payload, error::Error};
 
 const ROOT_KEY_BITS: u32 = 4096;
 const LEAF_KEY_BITS: u32 = 2048;
+const PKI_SCHEMA_VERSION: u8 = 1;
+const PKI_DIR_NAME: &str = "pki";
+const PKI_INFRA_FILE_NAME: &str = "infra.yaml";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PkiInitOptions {
@@ -41,33 +45,108 @@ pub struct PkiIssueOptions {
     pub days: u32,
 }
 
-pub fn init_profile_pki(
-    profile_path: &Path,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PkiInfraDocument {
+    #[serde(default = "default_pki_schema_version")]
+    pub schema_version: u8,
+    pub root: PkiRootRecord,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issued: Vec<PkiIssuedRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PkiRootRecord {
+    pub common_name: String,
+    pub days: u32,
+    pub key_path: PathBuf,
+    pub cert_path: PathBuf,
+    pub chain_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PkiIssuedRecord {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub common_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ip_addrs: Vec<IpAddr>,
+    pub client: bool,
+    pub server: bool,
+    pub days: u32,
+    pub key_path: PathBuf,
+    pub cert_path: PathBuf,
+    pub chain_path: PathBuf,
+}
+
+pub fn pki_root_dir() -> Result<PathBuf, Error> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|path| path.join(".runvault").join(PKI_DIR_NAME))
+        .ok_or_else(|| Error::Pki("HOME is not set; cannot resolve ~/.runvault/pki".to_string()))
+}
+
+pub fn pki_infra_path() -> Result<PathBuf, Error> {
+    Ok(pki_root_dir()?.join(PKI_INFRA_FILE_NAME))
+}
+
+pub fn init_infra_pki(password: SecretString, options: &PkiInitOptions) -> Result<PathBuf, Error> {
+    let root_dir = pki_root_dir()?;
+    init_infra_pki_at(&root_dir, password, options)
+}
+
+pub fn issue_infra_certificate(
+    password: SecretString,
+    name: &str,
+    options: &PkiIssueOptions,
+) -> Result<PathBuf, Error> {
+    let root_dir = pki_root_dir()?;
+    issue_infra_certificate_at(&root_dir, password, name, options)
+}
+
+pub fn rotate_infra_certificates(password: SecretString) -> Result<(), Error> {
+    let root_dir = pki_root_dir()?;
+    rotate_infra_certificates_at(&root_dir, password)
+}
+
+fn init_infra_pki_at(
+    root_dir: &Path,
     password: SecretString,
     options: &PkiInitOptions,
 ) -> Result<PathBuf, Error> {
-    let profile = Profile::from_path(profile_path)?;
-    let profile_dir = profile_dir(profile_path)?;
-    let root_dir = profile_dir.join("pki").join("ca").join("root");
-    let root_key_path = root_dir.join("root.key.pem");
-    let root_cert_path = root_dir.join("root.crt.pem");
-    let root_chain_path = root_dir.join("root.chain.pem");
+    let pki_dir = root_dir.to_path_buf();
+    let infra_path = pki_dir.join(PKI_INFRA_FILE_NAME);
+    let root_key_rel = PathBuf::from("ca").join("root").join("root.key.pem");
+    let root_cert_rel = PathBuf::from("ca").join("root").join("root.crt.pem");
+    let root_chain_rel = PathBuf::from("ca").join("root").join("root.chain.pem");
+    let root_key_path = pki_dir.join(&root_key_rel);
+    let root_cert_path = pki_dir.join(&root_cert_rel);
+    let root_chain_path = pki_dir.join(&root_chain_rel);
 
-    for path in [&root_key_path, &root_cert_path, &root_chain_path] {
+    for path in [
+        &infra_path,
+        &root_key_path,
+        &root_cert_path,
+        &root_chain_path,
+    ] {
         if path.exists() {
             return Err(Error::AlreadyExists(path.clone()));
         }
     }
 
-    std::fs::create_dir_all(&root_dir).map_err(|source| Error::WriteFile {
-        path: root_dir.clone(),
+    let root_material_dir = root_key_path
+        .parent()
+        .ok_or_else(|| Error::Pki("root key path has no parent directory".to_string()))?;
+    std::fs::create_dir_all(root_material_dir).map_err(|source| Error::WriteFile {
+        path: root_material_dir.to_path_buf(),
         source,
     })?;
 
     let common_name = options
         .common_name
         .clone()
-        .unwrap_or_else(|| format!("{} Root CA", profile.name));
+        .unwrap_or_else(|| "Runvault Root CA".to_string());
     if common_name.trim().is_empty() {
         return Err(Error::Pki(
             "root CA common name must not be empty".to_string(),
@@ -84,39 +163,43 @@ pub fn init_profile_pki(
     let cert_pem = cert.to_pem().map_err(pki_error)?;
     write_pem(&root_cert_path, &cert_pem)?;
     write_pem(&root_chain_path, &cert_pem)?;
-    Ok(root_dir)
+
+    save_infra_document(
+        &infra_path,
+        &PkiInfraDocument {
+            schema_version: default_pki_schema_version(),
+            root: PkiRootRecord {
+                common_name,
+                days: options.days,
+                key_path: root_key_rel,
+                cert_path: root_cert_rel,
+                chain_path: root_chain_rel,
+            },
+            issued: Vec::new(),
+        },
+    )?;
+
+    Ok(root_material_dir.to_path_buf())
 }
 
-pub fn issue_profile_certificate(
-    profile_path: &Path,
+fn issue_infra_certificate_at(
+    root_dir: &Path,
     password: SecretString,
     name: &str,
     options: &PkiIssueOptions,
 ) -> Result<PathBuf, Error> {
     validate_leaf_name(name)?;
-    let profile_dir = profile_dir(profile_path)?;
-    let root_dir = profile_dir.join("pki").join("ca").join("root");
-    let root_key_path = root_dir.join("root.key.pem");
-    let root_cert_path = root_dir.join("root.crt.pem");
+    let pki_dir = root_dir.to_path_buf();
+    let infra_path = pki_dir.join(PKI_INFRA_FILE_NAME);
+    let mut infra = load_infra_document(&infra_path)?;
 
-    let root_key = load_private_key_with_password(&root_key_path, password.clone())?;
-    let root_cert = load_certificate(&root_cert_path)?;
-
-    let issued_dir = profile_dir.join("pki").join("issued").join(name);
-    let leaf_key_path = issued_dir.join(format!("{name}.key.pem"));
-    let leaf_cert_path = issued_dir.join(format!("{name}.crt.pem"));
-    let leaf_chain_path = issued_dir.join(format!("{name}.chain.pem"));
-
-    for path in [&leaf_key_path, &leaf_cert_path, &leaf_chain_path] {
-        if path.exists() {
-            return Err(Error::AlreadyExists(path.clone()));
-        }
+    if infra.issued.iter().any(|issued| issued.name == name) {
+        return Err(Error::AlreadyExists(pki_dir.join("issued").join(name)));
     }
 
-    std::fs::create_dir_all(&issued_dir).map_err(|source| Error::WriteFile {
-        path: issued_dir.clone(),
-        source,
-    })?;
+    let root_key =
+        load_private_key_with_password(&pki_dir.join(&infra.root.key_path), password.clone())?;
+    let root_cert = load_certificate(&pki_dir.join(&infra.root.cert_path))?;
 
     let mut dns_names = options.dns_names.clone();
     let mut client = options.client;
@@ -129,38 +212,186 @@ pub fn issue_profile_certificate(
         dns_names.push(name.to_string());
     }
 
-    let common_name = options
-        .common_name
-        .clone()
-        .unwrap_or_else(|| name.to_string());
-    if common_name.trim().is_empty() {
+    let common_name = options.common_name.clone();
+    let resolved_common_name = common_name.clone().unwrap_or_else(|| name.to_string());
+    if resolved_common_name.trim().is_empty() {
         return Err(Error::Pki(
             "issued certificate common name must not be empty".to_string(),
         ));
     }
 
-    let key = generate_rsa_key(LEAF_KEY_BITS)?;
-    let cert = build_leaf_certificate(
-        &key,
+    let key_rel = PathBuf::from("issued")
+        .join(name)
+        .join(format!("{name}.key.pem"));
+    let cert_rel = PathBuf::from("issued")
+        .join(name)
+        .join(format!("{name}.crt.pem"));
+    let chain_rel = PathBuf::from("issued")
+        .join(name)
+        .join(format!("{name}.chain.pem"));
+    let key_path = pki_dir.join(&key_rel);
+    let cert_path = pki_dir.join(&cert_rel);
+    let chain_path = pki_dir.join(&chain_rel);
+
+    for path in [&key_path, &cert_path, &chain_path] {
+        if path.exists() {
+            return Err(Error::AlreadyExists(path.clone()));
+        }
+    }
+
+    write_leaf_materials(
+        &key_path,
+        &cert_path,
+        &chain_path,
         &root_key,
         &root_cert,
+        &resolved_common_name,
         name,
-        &common_name,
         &dns_names,
         &options.ip_addrs,
         client,
         server,
         options.days,
+        password,
+    )?;
+
+    infra.issued.push(PkiIssuedRecord {
+        name: name.to_string(),
+        common_name,
+        dns_names,
+        ip_addrs: options.ip_addrs.clone(),
+        client,
+        server,
+        days: options.days,
+        key_path: key_rel,
+        cert_path: cert_rel,
+        chain_path: chain_rel,
+    });
+    save_infra_document(&infra_path, &infra)?;
+
+    Ok(cert_path
+        .parent()
+        .ok_or_else(|| Error::Pki("issued certificate path has no parent directory".to_string()))?
+        .to_path_buf())
+}
+
+fn rotate_infra_certificates_at(root_dir: &Path, password: SecretString) -> Result<(), Error> {
+    let pki_dir = root_dir.to_path_buf();
+    let infra_path = pki_dir.join(PKI_INFRA_FILE_NAME);
+    let infra = load_infra_document(&infra_path)?;
+
+    let root_key =
+        load_private_key_with_password(&pki_dir.join(&infra.root.key_path), password.clone())?;
+    let root_cert = load_certificate(&pki_dir.join(&infra.root.cert_path))?;
+
+    for issued in &infra.issued {
+        let key_path = pki_dir.join(&issued.key_path);
+        let cert_path = pki_dir.join(&issued.cert_path);
+        let chain_path = pki_dir.join(&issued.chain_path);
+        let common_name = issued
+            .common_name
+            .clone()
+            .unwrap_or_else(|| issued.name.clone());
+        write_leaf_materials(
+            &key_path,
+            &cert_path,
+            &chain_path,
+            &root_key,
+            &root_cert,
+            &common_name,
+            &issued.name,
+            &issued.dns_names,
+            &issued.ip_addrs,
+            issued.client,
+            issued.server,
+            issued.days,
+            password.clone(),
+        )?;
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_leaf_materials(
+    key_path: &Path,
+    cert_path: &Path,
+    chain_path: &Path,
+    root_key: &PKey<Private>,
+    root_cert: &X509,
+    common_name: &str,
+    leaf_name: &str,
+    dns_names: &[String],
+    ip_addrs: &[IpAddr],
+    client: bool,
+    server: bool,
+    days: u32,
+    password: SecretString,
+) -> Result<(), Error> {
+    if let Some(parent) = key_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| Error::WriteFile {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+
+    let key = generate_rsa_key(LEAF_KEY_BITS)?;
+    let cert = build_leaf_certificate(
+        &key,
+        root_key,
+        root_cert,
+        leaf_name,
+        common_name,
+        dns_names,
+        ip_addrs,
+        client,
+        server,
+        days,
     )?;
 
     write_encrypted_pem(
-        &leaf_key_path,
+        key_path,
         &key.private_key_to_pem_pkcs8().map_err(pki_error)?,
         password,
     )?;
-    write_pem(&leaf_cert_path, &cert.to_pem().map_err(pki_error)?)?;
-    write_pem(&leaf_chain_path, &root_cert.to_pem().map_err(pki_error)?)?;
-    Ok(issued_dir)
+    write_pem(cert_path, &cert.to_pem().map_err(pki_error)?)?;
+    write_pem(chain_path, &root_cert.to_pem().map_err(pki_error)?)?;
+    Ok(())
+}
+
+fn load_infra_document(path: &Path) -> Result<PkiInfraDocument, Error> {
+    let content = std::fs::read_to_string(path).map_err(|source| Error::ReadFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let infra: PkiInfraDocument = serde_yaml::from_str(&content)
+        .map_err(|source| Error::Pki(format!("failed to parse {}: {}", path.display(), source)))?;
+    if infra.schema_version != PKI_SCHEMA_VERSION {
+        return Err(Error::Pki(format!(
+            "unsupported PKI infra schema version {}",
+            infra.schema_version
+        )));
+    }
+    Ok(infra)
+}
+
+fn save_infra_document(path: &Path, infra: &PkiInfraDocument) -> Result<(), Error> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| Error::WriteFile {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let yaml = serde_yaml::to_string(infra)
+        .map_err(|source| Error::Pki(format!("failed to serialize PKI infra: {}", source)))?;
+    std::fs::write(path, yaml).map_err(|source| Error::WriteFile {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn default_pki_schema_version() -> u8 {
+    PKI_SCHEMA_VERSION
 }
 
 fn build_root_certificate(
@@ -367,15 +598,6 @@ fn write_encrypted_pem(path: &Path, contents: &[u8], password: SecretString) -> 
     })
 }
 
-fn profile_dir(profile_path: &Path) -> Result<PathBuf, Error> {
-    profile_path.parent().map(Path::to_path_buf).ok_or_else(|| {
-        Error::InvalidProfile(format!(
-            "profile path '{}' does not have a parent directory",
-            profile_path.display()
-        ))
-    })
-}
-
 fn x509_name(common_name: &str) -> Result<openssl::x509::X509Name, Error> {
     let mut builder = X509NameBuilder::new().map_err(pki_error)?;
     builder
@@ -414,28 +636,21 @@ fn pki_error(err: openssl::error::ErrorStack) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{PkiInitOptions, PkiIssueOptions, init_profile_pki, issue_profile_certificate};
-    use crate::profile::{CreateProfileOptions, create_profile, resolve_profile_path};
+    use super::{
+        PkiInitOptions, PkiIssueOptions, init_infra_pki_at, issue_infra_certificate_at,
+        load_infra_document, rotate_infra_certificates_at,
+    };
+    use crate::error::Error;
     use age::secrecy::SecretString;
-    use std::{net::IpAddr, path::PathBuf, str::FromStr};
+    use std::{net::IpAddr, str::FromStr};
     use tempfile::tempdir;
 
     #[test]
-    fn initializes_profile_root_ca() {
+    fn initializes_machine_level_root_ca_and_infra_inventory() {
         let dir = tempdir().unwrap();
-        let profile_dir = dir.path().join("service");
-        create_profile(
-            &profile_dir,
-            &CreateProfileOptions {
-                name: Some("service".to_string()),
-                env_file: PathBuf::from("env.sec"),
-            },
-        )
-        .unwrap();
-        let profile_path = resolve_profile_path(&profile_dir);
 
-        let root_dir = init_profile_pki(
-            &profile_path,
+        let root_dir = init_infra_pki_at(
+            dir.path(),
             SecretString::from("secret".to_string()),
             &PkiInitOptions {
                 common_name: None,
@@ -444,6 +659,8 @@ mod tests {
         )
         .unwrap();
 
+        let infra = load_infra_document(&dir.path().join("infra.yaml")).unwrap();
+        assert_eq!(infra.root.common_name, "Runvault Root CA");
         let root_key = std::fs::read_to_string(root_dir.join("root.key.pem")).unwrap();
         assert!(root_key.contains("BEGIN ENCRYPTED PRIVATE KEY"));
         assert!(root_dir.join("root.crt.pem").exists());
@@ -451,36 +668,25 @@ mod tests {
     }
 
     #[test]
-    fn issues_leaf_certificate_signed_by_profile_root() {
+    fn issues_leaf_certificate_and_tracks_it_in_infra_yaml() {
         let dir = tempdir().unwrap();
-        let profile_dir = dir.path().join("service");
-        create_profile(
-            &profile_dir,
-            &CreateProfileOptions {
-                name: Some("service".to_string()),
-                env_file: PathBuf::from("env.sec"),
-            },
-        )
-        .unwrap();
-        let profile_path = resolve_profile_path(&profile_dir);
-
-        init_profile_pki(
-            &profile_path,
+        init_infra_pki_at(
+            dir.path(),
             SecretString::from("secret".to_string()),
             &PkiInitOptions {
-                common_name: None,
+                common_name: Some("Infra Root".to_string()),
                 days: 3650,
             },
         )
         .unwrap();
 
-        let issued_dir = issue_profile_certificate(
-            &profile_path,
+        let issued_dir = issue_infra_certificate_at(
+            dir.path(),
             SecretString::from("secret".to_string()),
             "api.service.local",
             &PkiIssueOptions {
                 common_name: None,
-                dns_names: vec![],
+                dns_names: vec!["api.service.local".to_string()],
                 ip_addrs: vec![IpAddr::from_str("127.0.0.1").unwrap()],
                 client: false,
                 server: true,
@@ -489,23 +695,131 @@ mod tests {
         )
         .unwrap();
 
-        let root = openssl::x509::X509::from_pem(
-            &std::fs::read(
-                profile_dir
-                    .join("pki")
-                    .join("ca")
-                    .join("root")
-                    .join("root.crt.pem"),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let leaf = openssl::x509::X509::from_pem(
-            &std::fs::read(issued_dir.join("api.service.local.crt.pem")).unwrap(),
-        )
-        .unwrap();
-        assert!(leaf.verify(root.public_key().unwrap().as_ref()).unwrap());
+        let infra = load_infra_document(&dir.path().join("infra.yaml")).unwrap();
+        assert_eq!(infra.issued.len(), 1);
+        assert_eq!(infra.issued[0].name, "api.service.local");
         assert!(issued_dir.join("api.service.local.key.pem").exists());
+        assert!(issued_dir.join("api.service.local.crt.pem").exists());
         assert!(issued_dir.join("api.service.local.chain.pem").exists());
+    }
+
+    #[test]
+    fn rotates_leaf_materials_from_tracked_inventory() {
+        let dir = tempdir().unwrap();
+        let password = SecretString::from("secret".to_string());
+        init_infra_pki_at(
+            dir.path(),
+            password.clone(),
+            &PkiInitOptions {
+                common_name: None,
+                days: 3650,
+            },
+        )
+        .unwrap();
+        let issued_dir = issue_infra_certificate_at(
+            dir.path(),
+            password.clone(),
+            "service",
+            &PkiIssueOptions {
+                common_name: Some("service".to_string()),
+                dns_names: vec!["service.example.com".to_string()],
+                ip_addrs: vec![],
+                client: true,
+                server: true,
+                days: 825,
+            },
+        )
+        .unwrap();
+        let key_before = std::fs::read(issued_dir.join("service.key.pem")).unwrap();
+
+        rotate_infra_certificates_at(dir.path(), password).unwrap();
+
+        let key_after = std::fs::read(issued_dir.join("service.key.pem")).unwrap();
+        assert_ne!(key_before, key_after);
+    }
+
+    #[test]
+    fn rejects_duplicate_issued_name() {
+        let dir = tempdir().unwrap();
+        let password = SecretString::from("secret".to_string());
+        init_infra_pki_at(
+            dir.path(),
+            password.clone(),
+            &PkiInitOptions {
+                common_name: None,
+                days: 3650,
+            },
+        )
+        .unwrap();
+        issue_infra_certificate_at(
+            dir.path(),
+            password.clone(),
+            "shared-name",
+            &PkiIssueOptions {
+                common_name: None,
+                dns_names: vec![],
+                ip_addrs: vec![],
+                client: true,
+                server: true,
+                days: 825,
+            },
+        )
+        .unwrap();
+
+        let err = issue_infra_certificate_at(
+            dir.path(),
+            password,
+            "shared-name",
+            &PkiIssueOptions {
+                common_name: None,
+                dns_names: vec![],
+                ip_addrs: vec![],
+                client: true,
+                server: true,
+                days: 825,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::AlreadyExists(_)));
+    }
+
+    #[test]
+    fn supports_wildcard_dns_names() {
+        let dir = tempdir().unwrap();
+        let password = SecretString::from("secret".to_string());
+        init_infra_pki_at(
+            dir.path(),
+            password.clone(),
+            &PkiInitOptions {
+                common_name: None,
+                days: 3650,
+            },
+        )
+        .unwrap();
+
+        let issued_dir = issue_infra_certificate_at(
+            dir.path(),
+            password,
+            "caddy-workers",
+            &PkiIssueOptions {
+                common_name: None,
+                dns_names: vec!["*.workers.api.mata35.fsb.home".to_string()],
+                ip_addrs: vec![],
+                client: false,
+                server: true,
+                days: 825,
+            },
+        )
+        .unwrap();
+
+        let leaf = openssl::x509::X509::from_pem(
+            &std::fs::read(issued_dir.join("caddy-workers.crt.pem")).unwrap(),
+        )
+        .unwrap();
+        let san = leaf.subject_alt_names().unwrap();
+        assert!(
+            san.iter()
+                .any(|name| { name.dnsname() == Some("*.workers.api.mata35.fsb.home") })
+        );
     }
 }

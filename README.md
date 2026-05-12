@@ -52,9 +52,10 @@ runvault import-files deployments/ovh/services files-spec.yaml tls-files.yaml
 runvault cmd set -- docker compose up -d
 runvault --profile deployments/ovh/services cmd set -- docker compose up -d
 runvault ping add api http://127.0.0.1:8080/health
-runvault --profile deployments/ovh/services pki init
-runvault --profile deployments/ovh/services pki issue glt.market --dns glt.market --server
-runvault --profile deployments/ovh/services pki issue mazie-client --client
+runvault pki init
+runvault pki issue --name glt.market --dns glt.market --server
+runvault pki issue --name mazie-client --client
+runvault pki rotate
 runvault set deployments/ovh/services TLS_KEY \
   --value \"secret-key\" \
   --to-file .runvault/tls/key.pem \
@@ -77,10 +78,18 @@ runvault cache clear deployments/ovh/services
 
 It does not create `env.sec`; that file is created lazily by the first `set` or `import`.
 
-`pki` keeps certificate material next to the profile under:
+`env.sec` now uses a two-layer key model:
+
+- one global user passphrase
+- one auto-generated per-profile data key
+
+The profile data key is wrapped with a key derived from the global passphrase, and the wrapped key is stored inside the visible vault metadata. Bundle exports carry that wrapped profile key too, so operators only need the global passphrase at runtime.
+
+`pki` is machine-level and keeps certificate material under:
 
 ```text
-<profile-folder>/pki/
+~/.runvault/pki/
+  infra.yaml
   ca/root/root.key.pem
   ca/root/root.crt.pem
   ca/root/root.chain.pem
@@ -89,7 +98,7 @@ It does not create `env.sec`; that file is created lazily by the first `set` or 
   issued/<name>/<name>.chain.pem
 ```
 
-`runvault pki init` creates the profile root CA. `runvault pki issue` signs a leaf with that root. Private key files keep their normal `*.key.pem` names, and `runvault` stores them as standard passphrase-encrypted PKCS#8 PEM files so they can also be reused outside `runvault` with the same passphrase. If you do not pass `--client` or `--server`, the issued cert gets both usages. If you issue a server cert without any `--dns` or `--ip` SANs, `runvault` uses the certificate name as the default DNS SAN.
+`runvault pki init` creates the machine root CA and records it in `~/.runvault/pki/infra.yaml`. `runvault pki issue --name ...` signs a leaf with that root, stores the leaf spec in `infra.yaml`, and writes the materials under `~/.runvault/pki/issued/<name>/`. `runvault pki rotate` replays the tracked issued-leaf inventory and regenerates all leaf keys/certs in place while keeping the current root CA unchanged. Private key files keep their normal `*.key.pem` names, and `runvault` stores them as standard passphrase-encrypted PKCS#8 PEM files so they can also be reused outside `runvault` with the same passphrase. If you do not pass `--client` or `--server`, the issued cert gets both usages. If you issue a server cert without any `--dns` or `--ip` SANs, `runvault` uses the certificate name as the default DNS SAN.
 
 ## Secure password reuse
 
@@ -98,18 +107,18 @@ It does not create `env.sec`; that file is created lazily by the first `set` or 
 Current behavior:
 
 - on macOS:
-  - `runvault` reuses the password from Keychain when a matching entry exists
+  - `runvault` reuses the global passphrase from Keychain when a matching entry exists
   - if no Keychain entry exists, it prompts
-  - once you enter a valid password, it stores it in Keychain for that profile
+  - once you enter a valid passphrase, it stores it in Keychain once for `runvault`
 - on platforms without supported system secure storage:
   - `runvault` prompts every command
 
 So the rule is:
 
-- system secure store available -> reuse through that store
+- system secure store available -> reuse the global passphrase through that store
 - no secure store -> prompt
 
-You can clear a stored profile password with:
+You can clear the stored global passphrase with:
 
 ```bash
 runvault cache clear deployments/ovh/services
@@ -238,9 +247,10 @@ Behavior:
 - `run --profile <path>` with no bundle reruns the current successful bundle registered for that profile's `name`
 - `rollback --profile <path>` reruns the previous successful registered bundle for that profile's `name`
 - registry history is stored in `~/.runvault/registry.yaml` and version order follows deployment history, not semantic version sorting
-- password reuse for registered bundle execution is keyed off the stored profile path under `~/.runvault`
+- password reuse for registered bundle execution uses the same global passphrase cache as normal profile operations
 - profile `resources:` are copied into the bundle and restored before execution
 - bundle schema version `1` uses structured YAML under top-level `env`, `files`, and `resources`
+- new visible vault writes use a wrapped per-profile key; older visible vault versions still load for compatibility
 - bundled relative target paths are normalized to explicit `./...` form and must not contain `..`
 
 ## Managing ping targets
@@ -511,12 +521,12 @@ Spec format:
 ```yaml
 files:
   SERVICE_CA_CRT:
-    src: ../pki/ca/root/root.crt.pem
+    src: ~/.runvault/pki/ca/root/root.crt.pem
     to-file: /home/debian/mata35/pki/root.crt.pem
     mode: "0644"
     cleanup: keep
   SERVICE_KEY:
-    src: ../pki/issued/glt.market/glt.market.key.pem
+    src: ~/.runvault/pki/issued/glt.market/glt.market.key.pem
     to-file: /home/debian/mata35/pki/glt.market.key.pem
     mode: "0600"
     cleanup: keep
