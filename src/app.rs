@@ -340,6 +340,14 @@ impl Runvault {
                 let (profile_input, key) = args.resolve(profile.as_ref());
                 self.delete_secret(Some(profile_input.as_path()), &key)
             }
+            Command::Unset(args) => {
+                let (profile_input, keys) = args.resolve(profile.as_ref());
+                self.delete_secrets(Some(profile_input.as_path()), &keys)
+            }
+            Command::UnsetFrom(args) => {
+                let (profile_input, input_paths) = args.resolve(profile.as_ref());
+                self.unset_from_env_files(Some(profile_input.as_path()), &input_paths)
+            }
             Command::Reveal(args) => {
                 let (profile_input, key) = args.resolve(profile.as_ref());
                 let value = self.reveal_secret(Some(profile_input.as_path()), &key)?;
@@ -693,16 +701,46 @@ impl Runvault {
     }
 
     pub fn delete_secret(&self, profile_input: Option<&Path>, key: &str) -> Result<(), Error> {
+        self.delete_secrets(profile_input, &[key.to_string()])
+    }
+
+    pub fn delete_secrets(
+        &self,
+        profile_input: Option<&Path>,
+        keys: &[String],
+    ) -> Result<(), Error> {
         let profile_input = self.profile_or_default(profile_input);
         profile::ensure_default_profile_exists(&profile_input)?;
         let profile_path = profile::resolve_profile_path(&profile_input);
         let mut loaded = Profile::from_path(&profile_path)?;
         let (mut vault, password) =
             self.load_vault_with_lazy_password_for_update(&loaded, &profile_path)?;
-        vault.delete(key)?;
-        loaded.remove_file_spec(key);
+        for key in keys {
+            vault.delete(key)?;
+            loaded.remove_file_spec(key);
+        }
         profile::save_profile_to_path(&profile_path, &loaded)?;
         vault::save_vault_with_password(&loaded, &profile_path, &vault, password)
+    }
+
+    pub fn unset_from_env_files(
+        &self,
+        profile_input: Option<&Path>,
+        input_paths: &[PathBuf],
+    ) -> Result<(), Error> {
+        let mut keys = Vec::new();
+        for input_path in input_paths {
+            let input = std::fs::read(input_path).map_err(|source| Error::ReadFile {
+                path: input_path.clone(),
+                source,
+            })?;
+            for key in parse_env_bytes(&input)?.into_keys() {
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
+        }
+        self.delete_secrets(profile_input, &keys)
     }
 
     pub fn reveal_secret(

@@ -108,6 +108,10 @@ runvault set deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS \
   --to-file .runvault/gcp-service-account.json \
   --mode 0600
 runvault delete GOOGLE_APPLICATION_CREDENTIALS
+runvault unset DATABASE_URL REDIS_URL
+runvault unset deployments/ovh/services DATABASE_URL REDIS_URL
+runvault unset-from .env .env.local
+runvault unset-from deployments/ovh/services .env .env.local
 runvault reveal DATABASE_URL
 runvault reveal GOOGLE_APPLICATION_CREDENTIALS --raw
 runvault run

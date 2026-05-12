@@ -27,6 +27,8 @@ pub enum Command {
     Import(ImportCommand),
     ImportFiles(ImportFilesArgs),
     Delete(DeleteArgs),
+    Unset(UnsetArgs),
+    UnsetFrom(UnsetFromArgs),
     Reveal(RevealArgs),
     Run(ProfileArgs),
     Rollback(ProfileArgs),
@@ -226,6 +228,18 @@ pub struct ImportFilesArgs {
 pub struct DeleteArgs {
     #[arg(value_name = "PROFILE_OR_KEY", num_args = 1..=2)]
     pub targets: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct UnsetArgs {
+    #[arg(value_name = "PROFILE_OR_KEY", num_args = 1..)]
+    pub targets: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct UnsetFromArgs {
+    #[arg(value_name = "PROFILE_OR_INPUT", num_args = 1..)]
+    pub targets: Vec<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -453,6 +467,34 @@ impl DeleteArgs {
                 key.clone(),
             ),
             _ => unreachable!("clap enforces delete target arity"),
+        }
+    }
+}
+
+impl UnsetArgs {
+    pub fn resolve(&self, global_profile: Option<&PathBuf>) -> (PathBuf, Vec<String>) {
+        if let Some(profile) = global_profile {
+            return (profile.clone(), self.targets.clone());
+        }
+        match self.targets.as_slice() {
+            [key] => (PathBuf::from(DEFAULT_PROFILE_DIR), vec![key.clone()]),
+            [first, rest @ ..] if looks_like_profile_path(&PathBuf::from(first)) => {
+                (PathBuf::from(first), rest.to_vec())
+            }
+            keys => (PathBuf::from(DEFAULT_PROFILE_DIR), keys.to_vec()),
+        }
+    }
+}
+
+impl UnsetFromArgs {
+    pub fn resolve(&self, global_profile: Option<&PathBuf>) -> (PathBuf, Vec<PathBuf>) {
+        if let Some(profile) = global_profile {
+            return (profile.clone(), self.targets.clone());
+        }
+        match self.targets.as_slice() {
+            [input] => (PathBuf::from(DEFAULT_PROFILE_DIR), vec![input.clone()]),
+            [first, rest @ ..] if looks_like_profile_path(first) => (first.clone(), rest.to_vec()),
+            inputs => (PathBuf::from(DEFAULT_PROFILE_DIR), inputs.to_vec()),
         }
     }
 }
@@ -818,6 +860,94 @@ mod tests {
         let Command::Reset = cli.command else {
             panic!("expected reset command");
         };
+    }
+
+    #[test]
+    fn unset_defaults_to_dot_vault_for_multiple_keys() {
+        let cli = Cli::try_parse_from(["runvault", "unset", "DATABASE_URL", "REDIS_URL"]).unwrap();
+
+        let Command::Unset(args) = cli.command else {
+            panic!("expected unset command");
+        };
+
+        let (profile, keys) = args.resolve(None);
+        assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
+        assert_eq!(keys, vec!["DATABASE_URL", "REDIS_URL"]);
+    }
+
+    #[test]
+    fn unset_accepts_explicit_profile_before_multiple_keys() {
+        let profile_dir = unique_temp_dir("runvault-cli-unset-profile");
+        fs::create_dir_all(&profile_dir).unwrap();
+        fs::write(
+            profile_dir.join("runvault.yaml"),
+            "name: test\nrun:\n  cmd: [\"true\"]\n",
+        )
+        .unwrap();
+
+        let cli = Cli::try_parse_from([
+            "runvault",
+            "unset",
+            profile_dir.to_str().unwrap(),
+            "DATABASE_URL",
+            "REDIS_URL",
+        ])
+        .unwrap();
+
+        let Command::Unset(args) = cli.command else {
+            panic!("expected unset command");
+        };
+
+        let (profile, keys) = args.resolve(None);
+        assert_eq!(profile, profile_dir);
+        assert_eq!(keys, vec!["DATABASE_URL", "REDIS_URL"]);
+    }
+
+    #[test]
+    fn unset_from_defaults_to_dot_vault_for_multiple_inputs() {
+        let cli = Cli::try_parse_from(["runvault", "unset-from", ".env", ".env.local"]).unwrap();
+
+        let Command::UnsetFrom(args) = cli.command else {
+            panic!("expected unset-from command");
+        };
+
+        let (profile, inputs) = args.resolve(None);
+        assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
+        assert_eq!(
+            inputs,
+            vec![PathBuf::from(".env"), PathBuf::from(".env.local")]
+        );
+    }
+
+    #[test]
+    fn unset_from_accepts_explicit_profile_when_runvault_yaml_exists() {
+        let profile_dir = unique_temp_dir("runvault-cli-unset-from-profile");
+        fs::create_dir_all(&profile_dir).unwrap();
+        fs::write(
+            profile_dir.join("runvault.yaml"),
+            "name: test\nrun:\n  cmd: [\"true\"]\n",
+        )
+        .unwrap();
+
+        let cli = Cli::try_parse_from([
+            "runvault",
+            "unset-from",
+            profile_dir.to_str().unwrap(),
+            ".env",
+            ".env.local",
+        ])
+        .unwrap();
+
+        let Command::UnsetFrom(args) = cli.command else {
+            panic!("expected unset-from command");
+        };
+
+        let (profile, inputs) = args.resolve(None);
+        assert_eq!(profile, profile_dir);
+        assert_eq!(
+            inputs,
+            vec![PathBuf::from(".env"), PathBuf::from(".env.local")]
+        );
     }
 
     #[test]
