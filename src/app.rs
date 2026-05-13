@@ -714,19 +714,14 @@ impl Runvault {
 
     pub fn list_pki_materials(&self) -> Result<(), Error> {
         let materials = self.pki_materials()?;
-        println!("{:<32} {:<13} {:<32} URI", "NAME", "KIND", "MATERIAL");
+        println!(
+            "{:<32} {:<13} {:<32} MATERIALS",
+            "NAME", "KIND", "COMMON NAME"
+        );
         for material in materials {
             println!(
                 "{:<32} {:<13} {:<32} {}",
-                material.name,
-                material.kind,
-                format!("key ({})", material.common_name),
-                material.key_uri
-            );
-            println!("{:<32} {:<13} {:<32} {}", "", "", "cert", material.cert_uri);
-            println!(
-                "{:<32} {:<13} {:<32} {}",
-                "", "", "chain", material.chain_uri
+                material.name, material.kind, material.common_name, "cert, key, chain"
             );
         }
         Ok(())
