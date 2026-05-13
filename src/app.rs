@@ -73,6 +73,13 @@ pub struct RevealedFile {
     pub cleanup: FileCleanup,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceListing {
+    pub name: String,
+    pub kind: String,
+    pub description: Option<String>,
+}
+
 impl Default for Runvault {
     fn default() -> Self {
         Self {
@@ -585,8 +592,12 @@ impl Runvault {
         pki::rotate_infra_certificates(self.load_pki_secret_password_for_pki_use()?)
     }
 
+    pub fn pki_materials(&self) -> Result<Vec<pki::PkiMaterialListing>, Error> {
+        pki::list_infra_materials()
+    }
+
     pub fn list_pki_materials(&self) -> Result<(), Error> {
-        let materials = pki::list_infra_materials()?;
+        let materials = self.pki_materials()?;
         println!("{:<32} {:<13} {:<32} URI", "NAME", "KIND", "MATERIAL");
         for material in materials {
             println!(
@@ -741,20 +752,33 @@ impl Runvault {
     }
 
     pub fn list_resources(&self, profile_input: Option<&Path>) -> Result<(), Error> {
+        let resources = self.resources(profile_input)?;
+        println!("{:<32} {:<6} DESCRIPTION", "NAME", "TYPE");
+        for resource in resources {
+            println!(
+                "{:<32} {:<6} {}",
+                resource.name,
+                resource.kind,
+                resource.description.unwrap_or_default()
+            );
+        }
+        Ok(())
+    }
+
+    pub fn resources(&self, profile_input: Option<&Path>) -> Result<Vec<ResourceListing>, Error> {
         let profile_input = self.profile_or_default(profile_input);
         profile::ensure_default_profile_exists(&profile_input)?;
         let profile_path = profile::resolve_profile_path(&profile_input);
         let loaded = Profile::from_path(&profile_path)?;
-        println!("{:<32} {:<6} DESCRIPTION", "NAME", "TYPE");
-        for (name, entry) in &loaded.resources {
-            println!(
-                "{:<32} {:<6} {}",
-                name,
-                entry.kind(),
-                entry.description().unwrap_or("")
-            );
-        }
-        Ok(())
+        Ok(loaded
+            .resources
+            .iter()
+            .map(|(name, entry)| ResourceListing {
+                name: name.clone(),
+                kind: entry.kind().to_string(),
+                description: entry.description().map(ToString::to_string),
+            })
+            .collect())
     }
 
     pub fn delete_secret(&self, profile_input: Option<&Path>, key: &str) -> Result<(), Error> {
@@ -1528,6 +1552,40 @@ assets:
         let profile = Profile::from_path(&profile_dir.join(profile::DEFAULT_PROFILE_FILE)).unwrap();
         let spec = profile.assets().get("CADDY_CONFIG_FILE").unwrap();
         assert_eq!(spec.source_path, dir.path().join(Path::new("Caddyfile")));
+    }
+
+    #[test]
+    fn resources_returns_registry_entries_for_library_callers() {
+        let dir = tempdir().unwrap();
+        let profile_dir = dir.path().join("profile");
+        profile::create_profile(
+            &profile_dir,
+            &CreateProfileOptions {
+                name: Some("test".to_string()),
+                env_file: PathBuf::from("env.sec"),
+            },
+        )
+        .unwrap();
+        let profile_path = profile_dir.join(profile::DEFAULT_PROFILE_FILE);
+        let mut profile = Profile::from_path(&profile_path).unwrap();
+        profile.resources.insert(
+            "app.namespace".to_string(),
+            profile::ResourceRegistryEntry::Text {
+                description: Some("Shared app namespace".to_string()),
+                value: "glt-market".to_string(),
+            },
+        );
+        profile::save_profile_to_path(&profile_path, &profile).unwrap();
+
+        let resources = Runvault::default().resources(Some(&profile_dir)).unwrap();
+
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].name, "app.namespace");
+        assert_eq!(resources[0].kind, "text");
+        assert_eq!(
+            resources[0].description.as_deref(),
+            Some("Shared app namespace")
+        );
     }
 }
 

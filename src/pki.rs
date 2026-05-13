@@ -168,6 +168,10 @@ pub fn list_infra_materials() -> Result<Vec<PkiMaterialListing>, Error> {
     list_infra_materials_at(&root_dir)
 }
 
+pub fn list_infra_materials_from(root_dir: &Path) -> Result<Vec<PkiMaterialListing>, Error> {
+    list_infra_materials_at(root_dir)
+}
+
 fn list_infra_materials_at(root_dir: &Path) -> Result<Vec<PkiMaterialListing>, Error> {
     let infra = load_infra_document(&root_dir.join(PKI_INFRA_FILE_NAME))?;
     let mut materials = Vec::with_capacity(infra.issued.len() + 1);

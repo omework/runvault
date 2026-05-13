@@ -531,28 +531,24 @@ The old `runvault import resources ...` command remains accepted as an alias.
 Spec format:
 
 ```yaml
-resources:
-  caddy.main_config:
-    type: file
-    description: Main Caddy config
-    path: ./Caddyfile
 assets:
-  BUNDLED_DOCKER_COMPOSE_FILE:
-    src: "@caddy.main_config"
+  - src: ./docker-compose.yml
     to-file: ./docker-compose.yml
     mode: "0644"
     cleanup: keep
+  - src: "@Caddyfile"
+    to-file: ./Caddyfile
 ```
 
 This import spec format is intentionally different from `runvault.yaml`:
 
 - import spec fields are `src` and `to-file`
 - stored profile fields are `source_path` and `target_path`
+- list entries infer stable asset keys from `to-file`
 
 Behavior:
 
 - assets are written into `runvault.yaml`, not into `env.sec`
-- `resources` entries in the spec are merged into `runvault.yaml`
 - asset specs can use direct `src`, `src: "@name"`, or legacy `ref`
 - `src: "@name"` looks up `name` in the profile resources registry first
 - if no registry entry exists, `src: "@name"` falls back to `name` as a source path relative to the spec file
@@ -580,6 +576,15 @@ Direct single-asset behavior:
 - `--mode` is optional and defaults to `0600`
 - `--keep` / `--on-exit` control cleanup the same way as YAML specs
 - `--key KEY` is optional; when omitted, `runvault` derives a stable asset key from `--to-file`
+
+Keyed asset maps are still accepted for compatibility:
+
+```yaml
+assets:
+  BUNDLED_DOCKER_COMPOSE_FILE:
+    src: ./docker-compose.yml
+    to-file: ./docker-compose.yml
+```
 
 ## Importing file-backed values from a YAML spec
 

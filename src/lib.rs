@@ -14,4 +14,5 @@ pub mod run;
 pub mod secure_store;
 pub mod vault;
 
-pub use app::{RevealedFile, RevealedValue, Runvault, SecretSource, SecretUpdate};
+pub use app::{ResourceListing, RevealedFile, RevealedValue, Runvault, SecretSource, SecretUpdate};
+pub use pki::PkiMaterialListing;

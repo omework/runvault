@@ -158,7 +158,7 @@ impl<'de> Deserialize<'de> for AssetImportDocument {
         #[derive(Deserialize)]
         struct RawAssetImportDocument {
             #[serde(default)]
-            assets: BTreeMap<String, AssetImportSpec>,
+            assets: Option<serde_yaml::Value>,
             #[serde(default)]
             resources: Option<serde_yaml::Value>,
             #[serde(default)]
@@ -168,9 +168,13 @@ impl<'de> Deserialize<'de> for AssetImportDocument {
         }
 
         let raw = RawAssetImportDocument::deserialize(deserializer)?;
-        let mut assets = raw.assets;
+        let mut assets = BTreeMap::new();
         let mut resources = raw.resource_registry;
         resources.extend(raw.resources_registry);
+
+        if let Some(value) = raw.assets {
+            assets.extend(parse_asset_import_entries::<D::Error>(value)?);
+        }
 
         if let Some(value) = raw.resources {
             if let Some(parsed_resources) =
@@ -178,7 +182,7 @@ impl<'de> Deserialize<'de> for AssetImportDocument {
             {
                 resources.extend(parsed_resources);
             } else {
-                assets.extend(parse_yaml_map::<AssetImportSpec, D::Error>(value)?);
+                assets.extend(parse_asset_import_entries::<D::Error>(value)?);
             }
         }
 
@@ -332,6 +336,55 @@ where
     E: de::Error,
 {
     serde_yaml::from_value(value).map_err(E::custom)
+}
+
+fn parse_asset_import_entries<E>(
+    value: serde_yaml::Value,
+) -> Result<BTreeMap<String, AssetImportSpec>, E>
+where
+    E: de::Error,
+{
+    if let Ok(map) = serde_yaml::from_value::<BTreeMap<String, AssetImportSpec>>(value.clone()) {
+        return Ok(map);
+    }
+    let list = serde_yaml::from_value::<Vec<AssetImportSpec>>(value).map_err(E::custom)?;
+    let mut assets = BTreeMap::new();
+    for spec in list {
+        assets.insert(infer_asset_key(&spec.to_file), spec);
+    }
+    Ok(assets)
+}
+
+fn infer_asset_key(target_path: &Path) -> String {
+    let mut key = String::from("ASSET_");
+    let mut last_was_underscore = true;
+
+    for ch in target_path.to_string_lossy().chars() {
+        let mapped = if ch.is_ascii_alphanumeric() {
+            ch.to_ascii_uppercase()
+        } else {
+            '_'
+        };
+        if mapped == '_' {
+            if !last_was_underscore {
+                key.push(mapped);
+            }
+            last_was_underscore = true;
+        } else {
+            key.push(mapped);
+            last_was_underscore = false;
+        }
+    }
+
+    while key.ends_with('_') {
+        key.pop();
+    }
+
+    if key == "ASSET" || key == "ASSET_" {
+        "ASSET_FILE".to_string()
+    } else {
+        key
+    }
 }
 
 impl Profile {
@@ -1386,6 +1439,30 @@ assets:
         assert_eq!(spec.to_file, PathBuf::from("./docker-compose.yml"));
         assert_eq!(spec.mode, "0600");
         assert_eq!(spec.cleanup, FileCleanup::OnExit);
+    }
+
+    #[test]
+    fn asset_import_document_accepts_list_entries_and_infers_keys() {
+        let document: AssetImportDocument = serde_yaml::from_str(
+            r#"
+assets:
+  - src: ./docker-compose.yml
+    to-file: ./docker-compose.yml
+    mode: "0644"
+    cleanup: keep
+  - src: "@Caddyfile"
+    to-file: ./Caddyfile
+"#,
+        )
+        .unwrap();
+
+        assert!(document.assets.contains_key("ASSET_DOCKER_COMPOSE_YML"));
+        assert!(document.assets.contains_key("ASSET_CADDYFILE"));
+        let spec = document.assets.get("ASSET_DOCKER_COMPOSE_YML").unwrap();
+        assert_eq!(spec.src, Some(PathBuf::from("./docker-compose.yml")));
+        assert_eq!(spec.to_file, PathBuf::from("./docker-compose.yml"));
+        assert_eq!(spec.mode, "0644");
+        assert_eq!(spec.cleanup, FileCleanup::Keep);
     }
 
     #[test]
