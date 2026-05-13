@@ -85,6 +85,12 @@ pub struct FileImportDocument {
     pub files: BTreeMap<String, FileImportSpec>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ResourceImportDocument {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resources: BTreeMap<String, ResourceRegistryEntry>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetImportSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -106,14 +112,6 @@ pub struct AssetImportSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 pub struct AssetImportDocument {
-    #[serde(
-        default,
-        rename = "resources",
-        alias = "resource_registry",
-        alias = "resources_registry",
-        skip_serializing_if = "BTreeMap::is_empty"
-    )]
-    pub resources: BTreeMap<String, ResourceRegistryEntry>,
     #[serde(default, rename = "assets", skip_serializing_if = "BTreeMap::is_empty")]
     pub assets: BTreeMap<String, AssetImportSpec>,
 }
@@ -159,34 +157,16 @@ impl<'de> Deserialize<'de> for AssetImportDocument {
         struct RawAssetImportDocument {
             #[serde(default)]
             assets: Option<serde_yaml::Value>,
-            #[serde(default)]
-            resources: Option<serde_yaml::Value>,
-            #[serde(default)]
-            resource_registry: BTreeMap<String, ResourceRegistryEntry>,
-            #[serde(default)]
-            resources_registry: BTreeMap<String, ResourceRegistryEntry>,
         }
 
         let raw = RawAssetImportDocument::deserialize(deserializer)?;
         let mut assets = BTreeMap::new();
-        let mut resources = raw.resource_registry;
-        resources.extend(raw.resources_registry);
 
         if let Some(value) = raw.assets {
             assets.extend(parse_asset_import_entries::<D::Error>(value)?);
         }
 
-        if let Some(value) = raw.resources {
-            if let Some(parsed_resources) =
-                parse_optional_yaml_map::<ResourceRegistryEntry, D::Error>(&value)?
-            {
-                resources.extend(parsed_resources);
-            } else {
-                assets.extend(parse_asset_import_entries::<D::Error>(value)?);
-            }
-        }
-
-        Ok(Self { resources, assets })
+        Ok(Self { assets })
     }
 }
 
@@ -244,18 +224,12 @@ impl<'de> Deserialize<'de> for Profile {
         }
 
         let raw = RawProfile::deserialize(deserializer)?;
-        let mut assets = raw.assets;
+        let assets = raw.assets;
         let mut resources = raw.resource_registry;
         resources.extend(raw.resources_registry);
 
         if let Some(value) = raw.resources {
-            if let Some(parsed_resources) =
-                parse_optional_yaml_map::<ResourceRegistryEntry, D::Error>(&value)?
-            {
-                resources.extend(parsed_resources);
-            } else {
-                assets.extend(parse_yaml_map::<AssetSpec, D::Error>(value)?);
-            }
+            resources.extend(parse_yaml_map::<ResourceRegistryEntry, D::Error>(value)?);
         }
 
         Ok(Self {
@@ -315,19 +289,6 @@ fn default_ping_timeout_seconds() -> u64 {
 
 fn default_ping_interval_millis() -> u64 {
     500
-}
-
-fn parse_optional_yaml_map<T, E>(
-    value: &serde_yaml::Value,
-) -> Result<Option<BTreeMap<String, T>>, E>
-where
-    T: DeserializeOwned,
-    E: de::Error,
-{
-    match serde_yaml::from_value(value.clone()) {
-        Ok(map) => Ok(Some(map)),
-        Err(_) => Ok(None),
-    }
 }
 
 fn parse_yaml_map<T, E>(value: serde_yaml::Value) -> Result<BTreeMap<String, T>, E>
@@ -644,6 +605,20 @@ pub fn load_file_import_document(path: &Path) -> Result<FileImportDocument, Erro
     Ok(document)
 }
 
+pub fn load_resource_import_document(path: &Path) -> Result<ResourceImportDocument, Error> {
+    let content = std::fs::read_to_string(path).map_err(|source| Error::ReadFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let document: ResourceImportDocument =
+        serde_yaml::from_str(&content).map_err(|source| Error::ImportSpecParse {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    validate_resource_registry_document(&document)?;
+    Ok(document)
+}
+
 pub fn load_asset_import_document(path: &Path) -> Result<AssetImportDocument, Error> {
     let content = std::fs::read_to_string(path).map_err(|source| Error::ReadFile {
         path: path.to_path_buf(),
@@ -705,9 +680,9 @@ fn is_at_source(path: &Path) -> bool {
 
 fn validate_file_import_document(document: &FileImportDocument) -> Result<(), Error> {
     validate_resource_registry_import(&document.resources)?;
-    if document.files.is_empty() && document.resources.is_empty() {
+    if document.files.is_empty() {
         return Err(Error::InvalidImportSpec(
-            "files or resources must contain at least one entry".to_string(),
+            "files must contain at least one entry".to_string(),
         ));
     }
     for (key, spec) in &document.files {
@@ -763,11 +738,20 @@ fn validate_file_import_document(document: &FileImportDocument) -> Result<(), Er
     Ok(())
 }
 
-fn validate_resource_import_document(document: &AssetImportDocument) -> Result<(), Error> {
+fn validate_resource_registry_document(document: &ResourceImportDocument) -> Result<(), Error> {
     validate_resource_registry_import(&document.resources)?;
-    if document.assets.is_empty() && document.resources.is_empty() {
+    if document.resources.is_empty() {
         return Err(Error::InvalidImportSpec(
-            "assets or resources must contain at least one entry".to_string(),
+            "resources must contain at least one entry".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_resource_import_document(document: &AssetImportDocument) -> Result<(), Error> {
+    if document.assets.is_empty() {
+        return Err(Error::InvalidImportSpec(
+            "assets must contain at least one entry".to_string(),
         ));
     }
     for (key, spec) in &document.assets {
@@ -881,9 +865,9 @@ mod tests {
     use super::{
         AssetImportDocument, AssetSpec, CreateProfileOptions, DEFAULT_ENV_FILE,
         DEFAULT_PROFILE_DIR, DEFAULT_PROFILE_FILE, FileCleanup, FileImportDocument, FileSpec,
-        PingTarget, Profile, create_profile, ensure_default_profile_exists, expand_user_home,
-        load_asset_import_document, load_file_import_document, resolve_profile_path,
-        resolve_source_path, save_profile_to_path,
+        PingTarget, Profile, ResourceImportDocument, create_profile, ensure_default_profile_exists,
+        expand_user_home, load_asset_import_document, load_file_import_document,
+        resolve_profile_path, resolve_source_path, save_profile_to_path,
     };
     use crate::error::Error;
     use std::{
@@ -1148,8 +1132,8 @@ pings:
     }
 
     #[test]
-    fn profile_loads_legacy_resources_as_assets() {
-        let profile: Profile = serde_yaml::from_str(
+    fn profile_rejects_assets_under_resources_key() {
+        let err = serde_yaml::from_str::<Profile>(
             r#"
 name: local
 resources:
@@ -1160,10 +1144,9 @@ run:
   cmd: ["true"]
 "#,
         )
-        .unwrap();
+        .unwrap_err();
 
-        assert!(profile.resources.is_empty());
-        assert!(profile.assets().contains_key("BUNDLED_DOCKER_COMPOSE_FILE"));
+        assert!(err.to_string().contains("missing field `type`"));
     }
 
     #[test]
@@ -1260,7 +1243,7 @@ files:
         assert!(matches!(err, Error::InvalidImportSpec(_)));
         assert!(
             err.to_string()
-                .contains("files or resources must contain at least one entry")
+                .contains("files must contain at least one entry")
         );
     }
 
@@ -1304,14 +1287,9 @@ files:
     }
 
     #[test]
-    fn file_import_document_accepts_resource_registry_refs() {
+    fn file_import_document_accepts_resource_refs() {
         let document: FileImportDocument = serde_yaml::from_str(
             r#"
-resources:
-  postgres.password:
-    type: text
-    description: Shared Postgres password
-    value: secret
 files:
   POSTGRES_PASSWORD:
     ref: postgres.password
@@ -1321,9 +1299,7 @@ files:
 
         let spec = document.files.get("POSTGRES_PASSWORD").unwrap();
         assert_eq!(spec.ref_name.as_deref(), Some("postgres.password"));
-        let entry = document.resources.get("postgres.password").unwrap();
-        assert_eq!(entry.kind(), "text");
-        assert_eq!(entry.description(), Some("Shared Postgres password"));
+        assert!(document.resources.is_empty());
     }
 
     #[test]
@@ -1418,7 +1394,7 @@ assets:
         assert!(matches!(err, Error::InvalidImportSpec(_)));
         assert!(
             err.to_string()
-                .contains("assets or resources must contain at least one entry")
+                .contains("assets must contain at least one entry")
         );
     }
 
@@ -1466,7 +1442,30 @@ assets:
     }
 
     #[test]
-    fn asset_import_document_loads_legacy_resources_as_assets() {
+    fn load_asset_import_document_rejects_resources_key() {
+        let dir = tempdir().unwrap();
+        let spec_path = dir.path().join("assets.yaml");
+        std::fs::write(
+            &spec_path,
+            r#"
+resources:
+  BUNDLED_DOCKER_COMPOSE_FILE:
+    src: ./docker-compose.yml
+    to-file: ./docker-compose.yml
+"#,
+        )
+        .unwrap();
+
+        let err = load_asset_import_document(&spec_path).unwrap_err();
+        assert!(matches!(err, Error::InvalidImportSpec(_)));
+        assert!(
+            err.to_string()
+                .contains("assets must contain at least one entry")
+        );
+    }
+
+    #[test]
+    fn asset_import_document_ignores_resources_key_when_deserialized_directly() {
         let document: AssetImportDocument = serde_yaml::from_str(
             r#"
 resources:
@@ -1477,13 +1476,12 @@ resources:
         )
         .unwrap();
 
-        assert!(document.resources.is_empty());
-        assert!(document.assets.contains_key("BUNDLED_DOCKER_COMPOSE_FILE"));
+        assert!(document.assets.is_empty());
     }
 
     #[test]
-    fn asset_import_document_accepts_registry_only_specs() {
-        let document: AssetImportDocument = serde_yaml::from_str(
+    fn resource_import_document_accepts_registry_specs() {
+        let document: ResourceImportDocument = serde_yaml::from_str(
             r#"
 resources:
   caddy.main_config:
@@ -1494,7 +1492,6 @@ resources:
         )
         .unwrap();
 
-        assert!(document.assets.is_empty());
         let entry = document.resources.get("caddy.main_config").unwrap();
         assert_eq!(entry.kind(), "file");
         assert_eq!(entry.description(), Some("Main Caddy config"));

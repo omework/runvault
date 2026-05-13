@@ -194,8 +194,8 @@ pub struct PkiListArgs {}
 #[derive(Debug, Subcommand)]
 pub enum ImportSubcommand {
     Env(ImportEnvArgs),
-    #[command(alias = "resources")]
     Assets(ImportAssetsArgs),
+    Resources(ImportResourcesArgs),
 }
 
 #[derive(Debug, Args)]
@@ -225,6 +225,12 @@ pub struct ImportAssetsArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct ImportResourcesArgs {
+    #[arg(value_name = "INPUT", num_args = 1..)]
+    pub inputs: Vec<PathBuf>,
+}
+
+#[derive(Debug, Args)]
 pub struct ImportFilesArgs {
     #[arg(value_name = "PROFILE_OR_INPUT", num_args = 1..)]
     pub targets: Vec<PathBuf>,
@@ -239,11 +245,54 @@ pub struct ResourcesCommand {
 #[derive(Debug, Subcommand)]
 pub enum ResourcesSubcommand {
     List(ResourcesListArgs),
+    Add(ResourcesAddCommand),
+    Remove(ResourcesRemoveArgs),
+    RemoveFrom(ResourcesRemoveFromArgs),
 }
 
 #[derive(Debug, Args)]
-pub struct ResourcesListArgs {
-    pub profile: Option<PathBuf>,
+pub struct ResourcesListArgs {}
+
+#[derive(Debug, Args)]
+pub struct ResourcesAddCommand {
+    #[command(subcommand)]
+    pub command: ResourcesAddSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ResourcesAddSubcommand {
+    File(ResourcesAddFileArgs),
+    Text(ResourcesAddTextArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ResourcesAddFileArgs {
+    pub name: String,
+    #[arg(long, value_name = "PATH")]
+    pub path: PathBuf,
+    #[arg(long)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ResourcesAddTextArgs {
+    pub name: String,
+    #[arg(long)]
+    pub value: String,
+    #[arg(long)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ResourcesRemoveArgs {
+    #[arg(value_name = "NAME", num_args = 1..)]
+    pub names: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ResourcesRemoveFromArgs {
+    #[arg(value_name = "INPUT", num_args = 1..)]
+    pub inputs: Vec<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -475,15 +524,6 @@ impl ImportFilesArgs {
     }
 }
 
-impl ResourcesListArgs {
-    pub fn profile_or_default(&self, global_profile: Option<&PathBuf>) -> PathBuf {
-        global_profile
-            .cloned()
-            .or_else(|| self.profile.clone())
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR))
-    }
-}
-
 impl DeleteArgs {
     pub fn resolve(&self, global_profile: Option<&PathBuf>) -> (PathBuf, String) {
         match self.targets.as_slice() {
@@ -630,7 +670,7 @@ fn looks_like_profile_path(path: &PathBuf) -> bool {
 mod tests {
     use super::{
         Cli, CmdSubcommand, Command, DEFAULT_PROFILE_DIR, ImportSubcommand, PingSubcommand,
-        PkiSubcommand, ResourcesSubcommand,
+        PkiSubcommand, ResourcesAddSubcommand, ResourcesSubcommand,
     };
     use clap::Parser;
     use std::{
@@ -1142,19 +1182,17 @@ mod tests {
     }
 
     #[test]
-    fn import_assets_accepts_legacy_resources_alias() {
+    fn import_resources_parses_resource_files() {
         let cli = Cli::try_parse_from(["runvault", "import", "resources", "assets.yaml"]).unwrap();
 
         let Command::Import(args) = cli.command else {
             panic!("expected import command");
         };
-        let ImportSubcommand::Assets(args) = args.command else {
-            panic!("expected import assets subcommand");
+        let ImportSubcommand::Resources(args) = args.command else {
+            panic!("expected import resources subcommand");
         };
 
-        let (profile, inputs) = args.resolve(None);
-        assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
-        assert_eq!(inputs, vec![PathBuf::from("assets.yaml")]);
+        assert_eq!(args.inputs, vec![PathBuf::from("assets.yaml")]);
     }
 
     #[test]
@@ -1175,17 +1213,69 @@ mod tests {
     }
 
     #[test]
-    fn resources_list_defaults_to_dot_vault() {
+    fn resources_list_parses_without_profile() {
         let cli = Cli::try_parse_from(["runvault", "resources", "list"]).unwrap();
 
         let Command::Resources(args) = cli.command else {
             panic!("expected resources command");
         };
-        let ResourcesSubcommand::List(args) = args.command;
+        let ResourcesSubcommand::List(_args) = args.command else {
+            panic!("expected resources list subcommand");
+        };
+    }
 
+    #[test]
+    fn resources_add_file_parses() {
+        let cli = Cli::try_parse_from([
+            "runvault",
+            "resources",
+            "add",
+            "file",
+            "caddy.main_config",
+            "--path",
+            "./Caddyfile",
+            "--description",
+            "Main Caddy config",
+        ])
+        .unwrap();
+
+        let Command::Resources(args) = cli.command else {
+            panic!("expected resources command");
+        };
+        let ResourcesSubcommand::Add(add) = args.command else {
+            panic!("expected resources add subcommand");
+        };
+        let ResourcesAddSubcommand::File(args) = add.command else {
+            panic!("expected resources add file subcommand");
+        };
+        assert_eq!(args.name, "caddy.main_config");
+        assert_eq!(args.path, PathBuf::from("./Caddyfile"));
+        assert_eq!(args.description.as_deref(), Some("Main Caddy config"));
+    }
+
+    #[test]
+    fn resources_remove_from_parses() {
+        let cli = Cli::try_parse_from([
+            "runvault",
+            "resources",
+            "remove-from",
+            "resources-a.yaml",
+            "resources-b.yaml",
+        ])
+        .unwrap();
+
+        let Command::Resources(args) = cli.command else {
+            panic!("expected resources command");
+        };
+        let ResourcesSubcommand::RemoveFrom(args) = args.command else {
+            panic!("expected resources remove-from subcommand");
+        };
         assert_eq!(
-            args.profile_or_default(None),
-            PathBuf::from(DEFAULT_PROFILE_DIR)
+            args.inputs,
+            vec![
+                PathBuf::from("resources-a.yaml"),
+                PathBuf::from("resources-b.yaml")
+            ]
         );
     }
 

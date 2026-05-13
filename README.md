@@ -204,15 +204,6 @@ assets:
     target_path: ./docker-compose.yml
     mode: "0644"
     cleanup: keep
-resources:
-  caddy.main_config:
-    type: file
-    description: Main Caddy config
-    path: ./Caddyfile
-  app.namespace:
-    type: text
-    description: Shared app namespace
-    value: glt-market
 pings:
   - name: api
     url: http://127.0.0.1:8080/health
@@ -226,9 +217,6 @@ Inside `runvault.yaml`, `assets:` uses profile field names:
 
 - `source_path`
 - `target_path`
-
-`resources:` is an optional shared registry for import-time references.
-It supports `file` entries with `path` and `text` entries with `value`.
 
 ## Creating a profile folder
 
@@ -526,8 +514,6 @@ You can bulk-load profile assets from a YAML file:
 runvault import assets deployments/ovh/services assets.yaml
 ```
 
-The old `runvault import resources ...` command remains accepted as an alias.
-
 Spec format:
 
 ```yaml
@@ -550,7 +536,7 @@ Behavior:
 
 - assets are written into `runvault.yaml`, not into `env.sec`
 - asset specs can use direct `src`, `src: "@name"`, or legacy `ref`
-- `src: "@name"` looks up `name` in the profile resources registry first
+- `src: "@name"` looks up `name` in the global resources registry first
 - if no registry entry exists, `src: "@name"` falls back to `name` as a source path relative to the spec file
 - multiple spec files are imported from left to right
 - later spec files overwrite earlier asset entries with the same key
@@ -618,18 +604,9 @@ files:
     src: ../firebase/service-account.json
 ```
 
-File import specs can also define or reuse registry entries:
+File import specs can reuse global resource registry entries:
 
 ```yaml
-resources:
-  app.namespace:
-    type: text
-    description: Shared app namespace
-    value: glt-market
-  service.ca:
-    type: file
-    description: Service CA certificate
-    path: pki://ca/crt.pem
 files:
   APP_ID:
     src: "@app.namespace"
@@ -642,24 +619,58 @@ files:
 
 For `runvault import-files`, `file` refs behave like `src`; `text` refs behave
 like inline values and are stored encrypted in `env.sec`. Registry `value`
-fields are visible in `runvault.yaml`, so use `text` entries only for values
-that are acceptable to keep in the profile.
+fields are visible in the global resources registry, so use `text` entries only
+for values that are acceptable to keep outside `env.sec`.
 
 Quote `@...` values in YAML, because unquoted `@` is reserved by YAML parsers.
 The older `ref: name` notation is still accepted for compatibility.
-Legacy asset specs that used top-level `resources:` are still loaded; new specs
-should use `assets:` so `resources:` is reserved for registry entries.
 
-## Listing resource registry entries
+## Managing global resources
 
-Show the resources registered in a profile:
+Resources are global references stored under `~/.runvault/resources.yaml`.
+They are managed only through `runvault resources ...` or `runvault import resources ...`.
+
+Import resources from one or more YAML files:
 
 ```bash
-runvault resources list deployments/ovh/services
-runvault -p deployments/ovh/services resources list
+runvault import resources resources.yaml
 ```
 
-Output includes the registry name, type, and description.
+Resource spec format:
+
+```yaml
+resources:
+  app.namespace:
+    type: text
+    description: Shared app namespace
+    value: glt-market
+  service.ca:
+    type: file
+    description: Service CA certificate
+    path: pki://ca/crt.pem
+```
+
+Add individual resources:
+
+```bash
+runvault resources add file caddy.main_config --path ./Caddyfile --description "Main Caddy config"
+runvault resources add text app.namespace --value glt-market --description "Shared app namespace"
+```
+
+Remove resources directly or from a resource spec file:
+
+```bash
+runvault resources remove caddy.main_config app.namespace
+runvault resources remove-from resources.yaml
+```
+
+List registered resources:
+
+```bash
+runvault resources list
+```
+
+Output includes the resource name, type, and description.
 
 Behavior:
 

@@ -824,7 +824,11 @@ mod tests {
     };
     use crate::error::Error;
     use age::secrecy::SecretString;
-    use std::{net::IpAddr, path::Path, str::FromStr};
+    use std::{
+        net::IpAddr,
+        path::{Path, PathBuf},
+        str::FromStr,
+    };
     use tempfile::tempdir;
 
     #[test]
@@ -844,6 +848,9 @@ mod tests {
 
         let infra = load_infra_document(&dir.path().join("infra.yaml")).unwrap();
         assert_eq!(infra.root.common_name, "Runvault Root CA");
+        assert_eq!(infra.root.key_path, PathBuf::from("ca/key.pem"));
+        assert_eq!(infra.root.cert_path, PathBuf::from("ca/crt.pem"));
+        assert_eq!(infra.root.chain_path, PathBuf::from("ca/chain.pem"));
         let root_key = std::fs::read_to_string(root_dir.join("key.pem")).unwrap();
         assert!(root_key.contains("BEGIN ENCRYPTED PRIVATE KEY"));
         assert!(root_dir.join("crt.pem").exists());
