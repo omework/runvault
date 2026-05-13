@@ -57,6 +57,16 @@ pub struct PkiIssueOptions {
     pub force: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PkiMaterialListing {
+    pub name: String,
+    pub kind: String,
+    pub common_name: String,
+    pub key_uri: String,
+    pub cert_uri: String,
+    pub chain_uri: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PkiInfraDocument {
     #[serde(default = "default_pki_schema_version")]
@@ -153,11 +163,54 @@ pub fn rotate_infra_certificates(password: SecretString) -> Result<(), Error> {
     rotate_infra_certificates_at(&root_dir, password)
 }
 
+pub fn list_infra_materials() -> Result<Vec<PkiMaterialListing>, Error> {
+    let root_dir = pki_root_dir()?;
+    list_infra_materials_at(&root_dir)
+}
+
+fn list_infra_materials_at(root_dir: &Path) -> Result<Vec<PkiMaterialListing>, Error> {
+    let infra = load_infra_document(&root_dir.join(PKI_INFRA_FILE_NAME))?;
+    let mut materials = Vec::with_capacity(infra.issued.len() + 1);
+    materials.push(PkiMaterialListing {
+        name: PKI_CA_NAME.to_string(),
+        kind: "ca".to_string(),
+        common_name: infra.root.common_name,
+        key_uri: pki_material_uri(PKI_CA_NAME, PkiMaterialFile::Key),
+        cert_uri: pki_material_uri(PKI_CA_NAME, PkiMaterialFile::Cert),
+        chain_uri: pki_material_uri(PKI_CA_NAME, PkiMaterialFile::Chain),
+    });
+    for issued in infra.issued {
+        let common_name = issued.common_name.unwrap_or_else(|| issued.name.clone());
+        materials.push(PkiMaterialListing {
+            name: issued.name.clone(),
+            kind: issued_kind(issued.client, issued.server).to_string(),
+            common_name,
+            key_uri: pki_material_uri(&issued.name, PkiMaterialFile::Key),
+            cert_uri: pki_material_uri(&issued.name, PkiMaterialFile::Cert),
+            chain_uri: pki_material_uri(&issued.name, PkiMaterialFile::Chain),
+        });
+    }
+    Ok(materials)
+}
+
 fn default_init_options() -> PkiInitOptions {
     PkiInitOptions {
         common_name: None,
         days: DEFAULT_ROOT_CA_DAYS,
         force: false,
+    }
+}
+
+fn pki_material_uri(name: &str, file: PkiMaterialFile) -> String {
+    format!("{}{}/{}", PKI_URI_SCHEME, name, file.file_name())
+}
+
+fn issued_kind(client: bool, server: bool) -> &'static str {
+    match (client, server) {
+        (true, true) => "client,server",
+        (true, false) => "client",
+        (false, true) => "server",
+        (false, false) => "leaf",
     }
 }
 
@@ -762,7 +815,7 @@ fn pki_error(err: openssl::error::ErrorStack) -> Error {
 mod tests {
     use super::{
         DEFAULT_ROOT_CA_DAYS, PkiInitOptions, PkiIssueOptions, init_infra_pki_at,
-        issue_infra_certificate_at, load_infra_document, resolve_pki_uri,
+        issue_infra_certificate_at, list_infra_materials_at, load_infra_document, resolve_pki_uri,
         rotate_infra_certificates_at, validate_leaf_name,
     };
     use crate::error::Error;
@@ -829,6 +882,49 @@ mod tests {
         assert!(issued_dir.join("key.pem").exists());
         assert!(issued_dir.join("crt.pem").exists());
         assert!(issued_dir.join("chain.pem").exists());
+    }
+
+    #[test]
+    fn lists_ca_and_issued_material_uris() {
+        let dir = tempdir().unwrap();
+        let password = SecretString::from("secret".to_string());
+        init_infra_pki_at(
+            dir.path(),
+            password.clone(),
+            &PkiInitOptions {
+                common_name: Some("Infra Root".to_string()),
+                days: 3650,
+                force: false,
+            },
+        )
+        .unwrap();
+        issue_infra_certificate_at(
+            dir.path(),
+            password,
+            "api.service.local",
+            &PkiIssueOptions {
+                common_name: Some("api".to_string()),
+                dns_names: vec!["api.service.local".to_string()],
+                ip_addrs: vec![],
+                client: false,
+                server: true,
+                days: 825,
+                force: false,
+            },
+        )
+        .unwrap();
+
+        let materials = list_infra_materials_at(dir.path()).unwrap();
+
+        assert_eq!(materials.len(), 2);
+        assert_eq!(materials[0].name, "ca");
+        assert_eq!(materials[0].kind, "ca");
+        assert_eq!(materials[0].common_name, "Infra Root");
+        assert_eq!(materials[0].key_uri, "pki://ca/key.pem");
+        assert_eq!(materials[1].name, "api.service.local");
+        assert_eq!(materials[1].kind, "server");
+        assert_eq!(materials[1].common_name, "api");
+        assert_eq!(materials[1].cert_uri, "pki://api.service.local/crt.pem");
     }
 
     #[test]

@@ -152,6 +152,7 @@ pub enum PkiSubcommand {
     Init(PkiInitArgs),
     Issue(PkiIssueArgs),
     Rotate(PkiRotateArgs),
+    List(PkiListArgs),
 }
 
 #[derive(Debug, Args)]
@@ -186,6 +187,9 @@ pub struct PkiIssueArgs {
 
 #[derive(Debug, Args)]
 pub struct PkiRotateArgs {}
+
+#[derive(Debug, Args)]
+pub struct PkiListArgs {}
 
 #[derive(Debug, Subcommand)]
 pub enum ImportSubcommand {
@@ -879,6 +883,18 @@ mod tests {
         };
         let PkiSubcommand::Rotate(_args) = args.command else {
             panic!("expected pki rotate subcommand");
+        };
+    }
+
+    #[test]
+    fn pki_list_parses_without_profile() {
+        let cli = Cli::try_parse_from(["runvault", "pki", "list"]).unwrap();
+
+        let Command::Pki(args) = cli.command else {
+            panic!("expected pki command");
+        };
+        let PkiSubcommand::List(_args) = args.command else {
+            panic!("expected pki list subcommand");
         };
     }
 

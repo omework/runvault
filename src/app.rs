@@ -289,6 +289,7 @@ impl Runvault {
                     println!("rotated tracked PKI leaf certificates");
                     Ok(())
                 }
+                PkiSubcommand::List(_) => self.list_pki_materials(),
             },
             Command::Import(args) => match args.command {
                 ImportSubcommand::Env(args) => {
@@ -582,6 +583,26 @@ impl Runvault {
 
     pub fn rotate_pki(&self) -> Result<(), Error> {
         pki::rotate_infra_certificates(self.load_pki_secret_password_for_pki_use()?)
+    }
+
+    pub fn list_pki_materials(&self) -> Result<(), Error> {
+        let materials = pki::list_infra_materials()?;
+        println!("{:<32} {:<13} {:<32} URI", "NAME", "KIND", "MATERIAL");
+        for material in materials {
+            println!(
+                "{:<32} {:<13} {:<32} {}",
+                material.name,
+                material.kind,
+                format!("key ({})", material.common_name),
+                material.key_uri
+            );
+            println!("{:<32} {:<13} {:<32} {}", "", "", "cert", material.cert_uri);
+            println!(
+                "{:<32} {:<13} {:<32} {}",
+                "", "", "chain", material.chain_uri
+            );
+        }
+        Ok(())
     }
 
     pub fn import_env_files(
