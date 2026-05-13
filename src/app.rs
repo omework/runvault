@@ -20,8 +20,8 @@ use crate::{
     password::{prompt_password_confirm, prompt_password_once},
     pki::{self, PkiInitOptions, PkiIssueOptions},
     profile::{
-        self, CreateProfileOptions, FileCleanup, FileImportSpec, FileSpec, PingTarget, Profile,
-        ResourceImportSpec, ResourceRegistryEntry, ResourceSpec,
+        self, AssetImportSpec, AssetSpec, CreateProfileOptions, FileCleanup, FileImportSpec,
+        FileSpec, PingTarget, Profile, ResourceRegistryEntry,
     },
     registry::{
         RegistryEntryStatus, append_history_entry, current_bundle_path, current_version,
@@ -299,7 +299,7 @@ impl Runvault {
                         args.prefix.as_deref(),
                     )
                 }
-                ImportSubcommand::Resources(args) => {
+                ImportSubcommand::Assets(args) => {
                     if args.uses_inline_spec() {
                         let (profile_input, src) = args
                             .resolve_inline(profile.as_ref())
@@ -307,15 +307,15 @@ impl Runvault {
                         let target_path = args
                             .to_file
                             .clone()
-                            .expect("inline resource to-file is required");
+                            .expect("inline asset to-file is required");
                         let key = args
                             .key
                             .clone()
-                            .unwrap_or_else(|| infer_resource_key(&target_path));
-                        self.upsert_resource(
+                            .unwrap_or_else(|| infer_asset_key(&target_path));
+                        self.upsert_asset(
                             Some(profile_input.as_path()),
                             &key,
-                            ResourceImportSpec {
+                            AssetImportSpec {
                                 src: Some(src),
                                 ref_name: None,
                                 to_file: target_path,
@@ -329,7 +329,7 @@ impl Runvault {
                         )
                     } else {
                         let (profile_input, input_paths) = args.resolve(profile.as_ref());
-                        self.import_resource_specs(Some(profile_input.as_path()), &input_paths)
+                        self.import_asset_specs(Some(profile_input.as_path()), &input_paths)
                     }
                 }
             },
@@ -623,7 +623,7 @@ impl Runvault {
                         spec.clone()
                     } else {
                         let document = profile::load_file_import_document(&reference_path)?;
-                        loaded.merge_resource_registry(document.resource_registry);
+                        loaded.merge_resource_registry(document.resources);
                         let spec = document.files.get(&key).cloned().ok_or_else(|| {
                             Error::InvalidImportSpec(format!(
                                 "reference file '{}' does not define key '{}'",
@@ -650,7 +650,7 @@ impl Runvault {
         vault::save_vault_with_password(&loaded, &profile_path, &vault, password)
     }
 
-    pub fn import_resource_specs(
+    pub fn import_asset_specs(
         &self,
         profile_input: Option<&Path>,
         input_paths: &[PathBuf],
@@ -661,31 +661,31 @@ impl Runvault {
         let mut loaded = Profile::from_path(&profile_path)?;
 
         for input_path in input_paths {
-            let document = profile::load_resource_import_document(input_path)?;
-            loaded.merge_resource_registry(document.resource_registry);
+            let document = profile::load_asset_import_document(input_path)?;
+            loaded.merge_resource_registry(document.resources);
             let base_dir = input_path.parent().unwrap_or_else(|| Path::new("."));
-            for (key, spec) in document.resources {
-                let spec = resolve_resource_import_spec(&loaded, spec, base_dir)?;
-                apply_resource_import_spec(&mut loaded, &key, spec)?;
+            for (key, spec) in document.assets {
+                let spec = resolve_asset_import_spec(&loaded, spec, base_dir)?;
+                apply_asset_import_spec(&mut loaded, &key, spec)?;
             }
         }
 
         profile::save_profile_to_path(&profile_path, &loaded)
     }
 
-    pub fn upsert_resource(
+    pub fn upsert_asset(
         &self,
         profile_input: Option<&Path>,
         key: &str,
-        spec: ResourceImportSpec,
+        spec: AssetImportSpec,
     ) -> Result<(), Error> {
         let profile_input = self.profile_or_default(profile_input);
         profile::ensure_default_profile_exists(&profile_input)?;
         let profile_path = profile::resolve_profile_path(&profile_input);
         let mut loaded = Profile::from_path(&profile_path)?;
         let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let spec = resolve_resource_import_spec(&loaded, spec, &base_dir)?;
-        apply_resource_import_spec(&mut loaded, key, spec)?;
+        let spec = resolve_asset_import_spec(&loaded, spec, &base_dir)?;
+        apply_asset_import_spec(&mut loaded, key, spec)?;
         profile::save_profile_to_path(&profile_path, &loaded)
     }
 
@@ -707,7 +707,7 @@ impl Runvault {
 
         for input_path in input_paths {
             let document = profile::load_file_import_document(input_path)?;
-            loaded.merge_resource_registry(document.resource_registry);
+            loaded.merge_resource_registry(document.resources);
             let base_dir = input_path.parent().unwrap_or_else(|| Path::new("."));
             for (key, spec) in document.files {
                 let spec = resolve_file_import_spec(&loaded, spec, base_dir)?;
@@ -725,7 +725,7 @@ impl Runvault {
         let profile_path = profile::resolve_profile_path(&profile_input);
         let loaded = Profile::from_path(&profile_path)?;
         println!("{:<32} {:<6} DESCRIPTION", "NAME", "TYPE");
-        for (name, entry) in &loaded.resource_registry {
+        for (name, entry) in &loaded.resources {
             println!(
                 "{:<32} {:<6} {}",
                 name,
@@ -1272,7 +1272,7 @@ fn resolve_file_import_spec(
     if let Some(ref_name) = spec.ref_name.take() {
         resolve_file_registry_ref(profile, &mut spec, &ref_name, base_dir)?;
     } else if let Some(ref_name) = spec.src.as_deref().and_then(parse_source_reference) {
-        if profile.resource_registry.contains_key(&ref_name) {
+        if profile.resources.contains_key(&ref_name) {
             resolve_file_registry_ref(profile, &mut spec, &ref_name, base_dir)?;
         } else {
             spec.src = Some(profile::resolve_source_path(
@@ -1294,7 +1294,7 @@ fn resolve_file_registry_ref(
     ref_name: &str,
     base_dir: &Path,
 ) -> Result<(), Error> {
-    let entry = profile.resource_registry.get(ref_name).ok_or_else(|| {
+    let entry = profile.resources.get(ref_name).ok_or_else(|| {
         Error::InvalidImportSpec(format!(
             "resource registry entry '{}' does not exist",
             ref_name
@@ -1322,15 +1322,15 @@ fn read_profile_source_bytes(path: &Path, password: &SecretString) -> Result<Vec
     Ok(maybe_decrypt_file_payload(&content, password.clone())?.to_vec())
 }
 
-fn resolve_resource_import_spec(
+fn resolve_asset_import_spec(
     profile: &Profile,
-    mut spec: ResourceImportSpec,
+    mut spec: AssetImportSpec,
     base_dir: &Path,
-) -> Result<ResourceImportSpec, Error> {
+) -> Result<AssetImportSpec, Error> {
     if let Some(ref_name) = spec.ref_name.take() {
         resolve_resource_registry_ref(profile, &mut spec, &ref_name, base_dir)?;
     } else if let Some(ref_name) = spec.src.as_deref().and_then(parse_source_reference) {
-        if profile.resource_registry.contains_key(&ref_name) {
+        if profile.resources.contains_key(&ref_name) {
             resolve_resource_registry_ref(profile, &mut spec, &ref_name, base_dir)?;
         } else {
             spec.src = Some(profile::resolve_source_path(
@@ -1347,11 +1347,11 @@ fn resolve_resource_import_spec(
 
 fn resolve_resource_registry_ref(
     profile: &Profile,
-    spec: &mut ResourceImportSpec,
+    spec: &mut AssetImportSpec,
     ref_name: &str,
     base_dir: &Path,
 ) -> Result<(), Error> {
-    let entry = profile.resource_registry.get(ref_name).ok_or_else(|| {
+    let entry = profile.resources.get(ref_name).ok_or_else(|| {
         Error::InvalidImportSpec(format!(
             "resource registry entry '{}' does not exist",
             ref_name
@@ -1363,7 +1363,7 @@ fn resolve_resource_registry_ref(
         }
         ResourceRegistryEntry::Text { .. } => {
             return Err(Error::InvalidImportSpec(format!(
-                "resource import ref '{}' must point to a file resource",
+                "asset import ref '{}' must point to a file resource",
                 ref_name
             )));
         }
@@ -1377,20 +1377,17 @@ fn parse_source_reference(path: &Path) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
-fn apply_resource_import_spec(
+fn apply_asset_import_spec(
     profile: &mut Profile,
     key: &str,
-    spec: ResourceImportSpec,
+    spec: AssetImportSpec,
 ) -> Result<(), Error> {
     let source_path = spec.src.ok_or_else(|| {
-        Error::InvalidImportSpec(format!(
-            "resource import '{}' was not resolved to a src",
-            key
-        ))
+        Error::InvalidImportSpec(format!("asset import '{}' was not resolved to a src", key))
     })?;
-    profile.resources.insert(
+    profile.assets.insert(
         key.to_string(),
-        ResourceSpec {
+        AssetSpec {
             source_path,
             target_path: spec.to_file,
             mode: spec.mode,
@@ -1400,8 +1397,8 @@ fn apply_resource_import_spec(
     Ok(())
 }
 
-fn infer_resource_key(target_path: &Path) -> String {
-    let mut key = String::from("RESOURCE_");
+fn infer_asset_key(target_path: &Path) -> String {
+    let mut key = String::from("ASSET_");
     let mut last_was_underscore = true;
 
     for ch in target_path.to_string_lossy().chars() {
@@ -1425,8 +1422,8 @@ fn infer_resource_key(target_path: &Path) -> String {
         key.pop();
     }
 
-    if key == "RESOURCE" || key == "RESOURCE_" {
-        "RESOURCE_FILE".to_string()
+    if key == "ASSET" || key == "ASSET_" {
+        "ASSET_FILE".to_string()
     } else {
         key
     }
@@ -1440,7 +1437,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn import_resources_resolves_at_source_from_registry_first() {
+    fn import_assets_resolves_at_source_from_resources_first() {
         let dir = tempdir().unwrap();
         let profile_dir = dir.path().join("profile");
         profile::create_profile(
@@ -1452,16 +1449,16 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.path().join("Caddyfile"), ":443 { respond ok }\n").unwrap();
-        let spec_path = dir.path().join("resources.yaml");
+        let spec_path = dir.path().join("assets.yaml");
         std::fs::write(
             &spec_path,
             r#"
-resource_registry:
+resources:
   caddy.main_config:
     type: file
     description: Main Caddy config
     path: ./Caddyfile
-resources:
+assets:
   CADDY_CONFIG_FILE:
     src: "@caddy.main_config"
     to-file: ./Caddyfile
@@ -1470,16 +1467,16 @@ resources:
         .unwrap();
 
         Runvault::default()
-            .import_resource_specs(Some(&profile_dir), &[spec_path])
+            .import_asset_specs(Some(&profile_dir), &[spec_path])
             .unwrap();
 
         let profile = Profile::from_path(&profile_dir.join(profile::DEFAULT_PROFILE_FILE)).unwrap();
-        let spec = profile.resources().get("CADDY_CONFIG_FILE").unwrap();
+        let spec = profile.assets().get("CADDY_CONFIG_FILE").unwrap();
         assert_eq!(spec.source_path, dir.path().join("Caddyfile"));
     }
 
     #[test]
-    fn import_resources_falls_back_to_at_source_as_relative_path() {
+    fn import_assets_falls_back_to_at_source_as_relative_path() {
         let dir = tempdir().unwrap();
         let profile_dir = dir.path().join("profile");
         profile::create_profile(
@@ -1491,11 +1488,11 @@ resources:
         )
         .unwrap();
         std::fs::write(dir.path().join("Caddyfile"), ":443 { respond ok }\n").unwrap();
-        let spec_path = dir.path().join("resources.yaml");
+        let spec_path = dir.path().join("assets.yaml");
         std::fs::write(
             &spec_path,
             r#"
-resources:
+assets:
   CADDY_CONFIG_FILE:
     src: "@Caddyfile"
     to-file: ./Caddyfile
@@ -1504,11 +1501,11 @@ resources:
         .unwrap();
 
         Runvault::default()
-            .import_resource_specs(Some(&profile_dir), &[spec_path])
+            .import_asset_specs(Some(&profile_dir), &[spec_path])
             .unwrap();
 
         let profile = Profile::from_path(&profile_dir.join(profile::DEFAULT_PROFILE_FILE)).unwrap();
-        let spec = profile.resources().get("CADDY_CONFIG_FILE").unwrap();
+        let spec = profile.assets().get("CADDY_CONFIG_FILE").unwrap();
         assert_eq!(spec.source_path, dir.path().join(Path::new("Caddyfile")));
     }
 }

@@ -190,7 +190,8 @@ pub struct PkiRotateArgs {}
 #[derive(Debug, Subcommand)]
 pub enum ImportSubcommand {
     Env(ImportEnvArgs),
-    Resources(ImportResourcesArgs),
+    #[command(alias = "resources")]
+    Assets(ImportAssetsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -202,7 +203,7 @@ pub struct ImportEnvArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct ImportResourcesArgs {
+pub struct ImportAssetsArgs {
     #[arg(value_name = "PROFILE_OR_INPUT_OR_SRC", num_args = 0..)]
     pub targets: Vec<PathBuf>,
     #[arg(long, value_name = "PATH")]
@@ -381,7 +382,7 @@ impl ImportEnvArgs {
     }
 }
 
-impl ImportResourcesArgs {
+impl ImportAssetsArgs {
     pub fn resolve(&self, global_profile: Option<&PathBuf>) -> (PathBuf, Vec<PathBuf>) {
         if let Some(profile) = global_profile {
             return (profile.clone(), self.targets.clone());
@@ -416,16 +417,18 @@ impl ImportResourcesArgs {
                         Ok((profile.clone(), src.clone()))
                     } else {
                         Err(
-                            "single resource import expects no positional arguments when -p/--profile and --src are both used"
+                            "single asset import expects no positional arguments when -p/--profile and --src are both used"
                                 .to_string(),
                         )
                     }
                 }
                 None => match self.targets.as_slice() {
                     [] => Ok((PathBuf::from(DEFAULT_PROFILE_DIR), src.clone())),
-                    [profile] if looks_like_profile_path(profile) => Ok((profile.clone(), src.clone())),
+                    [profile] if looks_like_profile_path(profile) => {
+                        Ok((profile.clone(), src.clone()))
+                    }
                     _ => Err(
-                        "single resource import expects only an optional PROFILE when --src is used"
+                        "single asset import expects only an optional PROFILE when --src is used"
                             .to_string(),
                     ),
                 },
@@ -436,7 +439,7 @@ impl ImportResourcesArgs {
             return match self.targets.as_slice() {
                 [src] => Ok((profile.clone(), src.clone())),
                 _ => Err(
-                    "single resource import expects exactly one positional source path when -p/--profile is used"
+                    "single asset import expects exactly one positional source path when -p/--profile is used"
                         .to_string(),
                 ),
             };
@@ -448,7 +451,7 @@ impl ImportResourcesArgs {
                 Ok((profile.clone(), src.clone()))
             }
             _ => Err(
-                "single resource import expects SOURCE_PATH plus optional PROFILE before it"
+                "single asset import expects SOURCE_PATH plus optional PROFILE before it"
                     .to_string(),
             ),
         }
@@ -1038,21 +1041,21 @@ mod tests {
     }
 
     #[test]
-    fn import_resources_defaults_to_dot_vault_for_multiple_specs() {
+    fn import_assets_defaults_to_dot_vault_for_multiple_specs() {
         let cli = Cli::try_parse_from([
             "runvault",
             "import",
-            "resources",
-            "resources-a.yaml",
-            "resources-b.yaml",
+            "assets",
+            "assets-a.yaml",
+            "assets-b.yaml",
         ])
         .unwrap();
 
         let Command::Import(args) = cli.command else {
             panic!("expected import command");
         };
-        let ImportSubcommand::Resources(args) = args.command else {
-            panic!("expected import resources subcommand");
+        let ImportSubcommand::Assets(args) = args.command else {
+            panic!("expected import assets subcommand");
         };
 
         let (profile, inputs) = args.resolve(None);
@@ -1060,18 +1063,18 @@ mod tests {
         assert_eq!(
             inputs,
             vec![
-                PathBuf::from("resources-a.yaml"),
-                PathBuf::from("resources-b.yaml")
+                PathBuf::from("assets-a.yaml"),
+                PathBuf::from("assets-b.yaml")
             ]
         );
     }
 
     #[test]
-    fn import_resources_accepts_direct_single_resource_form() {
+    fn import_assets_accepts_direct_single_asset_form() {
         let cli = Cli::try_parse_from([
             "runvault",
             "import",
-            "resources",
+            "assets",
             "docker-compose.yml",
             "--to-file",
             "./docker-compose.yml",
@@ -1083,8 +1086,8 @@ mod tests {
         let Command::Import(args) = cli.command else {
             panic!("expected import command");
         };
-        let ImportSubcommand::Resources(args) = args.command else {
-            panic!("expected import resources subcommand");
+        let ImportSubcommand::Assets(args) = args.command else {
+            panic!("expected import assets subcommand");
         };
 
         assert!(args.uses_inline_spec());
@@ -1096,13 +1099,13 @@ mod tests {
     }
 
     #[test]
-    fn import_resources_accepts_direct_form_with_explicit_profile_flag() {
+    fn import_assets_accepts_direct_form_with_explicit_profile_flag() {
         let cli = Cli::try_parse_from([
             "runvault",
             "--profile",
             "deployments/home/workers",
             "import",
-            "resources",
+            "assets",
             "docker-compose.yml",
             "--to-file",
             "./docker-compose.yml",
@@ -1113,13 +1116,29 @@ mod tests {
         let Command::Import(args) = cli.command else {
             panic!("expected import command");
         };
-        let ImportSubcommand::Resources(args) = args.command else {
-            panic!("expected import resources subcommand");
+        let ImportSubcommand::Assets(args) = args.command else {
+            panic!("expected import assets subcommand");
         };
 
         let (profile, src) = args.resolve_inline(global_profile).unwrap();
         assert_eq!(profile, PathBuf::from("deployments/home/workers"));
         assert_eq!(src, PathBuf::from("docker-compose.yml"));
+    }
+
+    #[test]
+    fn import_assets_accepts_legacy_resources_alias() {
+        let cli = Cli::try_parse_from(["runvault", "import", "resources", "assets.yaml"]).unwrap();
+
+        let Command::Import(args) = cli.command else {
+            panic!("expected import command");
+        };
+        let ImportSubcommand::Assets(args) = args.command else {
+            panic!("expected import assets subcommand");
+        };
+
+        let (profile, inputs) = args.resolve(None);
+        assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
+        assert_eq!(inputs, vec![PathBuf::from("assets.yaml")]);
     }
 
     #[test]

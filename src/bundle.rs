@@ -11,7 +11,7 @@ use tempfile::TempDir;
 use crate::{
     error::Error,
     profile::{
-        DEFAULT_PROFILE_FILE, FileCleanup, Profile, ResourceSpec, parse_file_mode,
+        AssetSpec, DEFAULT_PROFILE_FILE, FileCleanup, Profile, parse_file_mode,
         resolve_profile_path, resolve_source_path, save_profile_to_path,
     },
     vault::StoredFileCleanup,
@@ -41,8 +41,12 @@ pub struct BundleDocument {
     pub env: BTreeMap<String, BundledEnvEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub files: BTreeMap<String, BundledFileEntry>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub resources: BTreeMap<String, BundledResourceEntry>,
+    #[serde(
+        default,
+        alias = "resources",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub assets: BTreeMap<String, BundledAssetEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,7 +69,7 @@ pub struct BundledFileEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BundledResourceEntry {
+pub struct BundledAssetEntry {
     pub target_path: PathBuf,
     pub content_base64: String,
     #[serde(default = "default_bundle_file_mode")]
@@ -154,7 +158,7 @@ pub fn export_bundle(
     let visible_vault = parse_visible_vault_payload(&env_payload)?;
     let (visible_vault_crypto, visible_vault_wrapped_key, env, files) =
         split_visible_vault_entries(visible_vault)?;
-    let resources = bundle_profile_resources(&mut profile, &profile_path)?;
+    let assets = bundle_profile_assets(&mut profile, &profile_path)?;
 
     let bundle = BundleDocument {
         schema_version: default_bundle_schema_version(),
@@ -165,7 +169,7 @@ pub fn export_bundle(
         visible_vault_wrapped_key,
         env,
         files,
-        resources,
+        assets,
     };
 
     let yaml =
@@ -227,7 +231,7 @@ pub fn materialize_bundle_into(base_dir: &Path, bundle: &BundleDocument) -> Resu
         path: env_path,
         source,
     })?;
-    materialize_bundle_resources(base_dir, bundle)?;
+    materialize_bundle_assets(base_dir, bundle)?;
     Ok(profile_path)
 }
 
@@ -259,26 +263,26 @@ fn validate_bundle(bundle: &BundleDocument) -> Result<(), Error> {
         ));
     }
     reject_relative_parent_components(&bundle.profile.env_file, "bundled profile env_file")?;
-    if bundle.env.is_empty() && bundle.files.is_empty() && bundle.resources.is_empty() {
+    if bundle.env.is_empty() && bundle.files.is_empty() && bundle.assets.is_empty() {
         return Err(Error::InvalidBundle(
-            "bundle must contain env/files/resources payload".to_string(),
+            "bundle must contain env/files/assets payload".to_string(),
         ));
     }
-    for (key, value) in &bundle.resources {
+    for (key, value) in &bundle.assets {
         reject_relative_parent_components(
             &value.target_path,
-            &format!("bundled resource '{}' target_path", key),
+            &format!("bundled asset '{}' target_path", key),
         )?;
         if value.target_path.as_os_str().is_empty() {
             return Err(Error::InvalidBundle(format!(
-                "bundled resource '{}' target_path must not be empty",
+                "bundled asset '{}' target_path must not be empty",
                 key
             )));
         }
         parse_file_mode(&value.mode)?;
         let _ = STANDARD.decode(&value.content_base64).map_err(|err| {
             Error::InvalidBundle(format!(
-                "bundled resource '{}' content_base64 is invalid: {}",
+                "bundled asset '{}' content_base64 is invalid: {}",
                 key, err
             ))
         })?;
@@ -287,14 +291,14 @@ fn validate_bundle(bundle: &BundleDocument) -> Result<(), Error> {
     for (key, value) in &bundle.files {
         reject_relative_parent_components(&value.path, &format!("bundled file '{}' path", key))?;
     }
-    for (key, spec) in bundle.profile.resources() {
+    for (key, spec) in bundle.profile.assets() {
         reject_relative_parent_components(
             &spec.source_path,
-            &format!("bundled resource '{}' source_path", key),
+            &format!("bundled asset '{}' source_path", key),
         )?;
         reject_relative_parent_components(
             &spec.target_path,
-            &format!("bundled resource '{}' target_path", key),
+            &format!("bundled asset '{}' target_path", key),
         )?;
     }
     Ok(())
@@ -420,32 +424,32 @@ fn split_visible_vault_entries(
     Ok((visible.crypto, visible.wrapped_profile_key, env, files))
 }
 
-fn bundle_profile_resources(
+fn bundle_profile_assets(
     profile: &mut Profile,
     profile_path: &Path,
-) -> Result<BTreeMap<String, BundledResourceEntry>, Error> {
+) -> Result<BTreeMap<String, BundledAssetEntry>, Error> {
     let workdir = resolve_profile_workdir(profile, profile_path);
-    let mut resources = BTreeMap::new();
+    let mut assets = BTreeMap::new();
 
-    for (key, spec) in profile.resources().clone() {
+    for (key, spec) in profile.assets().clone() {
         let source_path = resolve_source_path(&spec.source_path, &workdir)?;
         let content = fs::read(&source_path).map_err(|source| Error::ReadFile {
             path: source_path,
             source,
         })?;
-        resources.insert(
+        assets.insert(
             key.clone(),
-            BundledResourceEntry {
+            BundledAssetEntry {
                 target_path: normalize_bundle_relative_path(&spec.target_path),
                 content_base64: STANDARD.encode(content),
                 mode: spec.mode.clone(),
                 cleanup: spec.cleanup,
             },
         );
-        profile.resources.insert(
+        profile.assets.insert(
             key.clone(),
-            ResourceSpec {
-                source_path: bundled_resource_source_path(&key, &spec),
+            AssetSpec {
+                source_path: bundled_asset_source_path(&key, &spec),
                 target_path: normalize_bundle_relative_path(&spec.target_path),
                 mode: spec.mode,
                 cleanup: spec.cleanup,
@@ -453,18 +457,18 @@ fn bundle_profile_resources(
         );
     }
 
-    Ok(resources)
+    Ok(assets)
 }
 
-fn bundled_resource_source_path(key: &str, spec: &ResourceSpec) -> PathBuf {
+fn bundled_asset_source_path(key: &str, spec: &AssetSpec) -> PathBuf {
     let file_name = spec
         .source_path
         .file_name()
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("resource"));
+        .unwrap_or_else(|| PathBuf::from("asset"));
     PathBuf::from(".runvault")
-        .join("resources")
+        .join("assets")
         .join(key)
         .join(file_name)
 }
@@ -483,22 +487,22 @@ fn normalize_profile_bundle_paths(profile: &mut Profile) {
     for spec in profile.files.values_mut() {
         spec.target_path = normalize_bundle_relative_path(&spec.target_path);
     }
-    for spec in profile.resources.values_mut() {
+    for spec in profile.assets.values_mut() {
         spec.target_path = normalize_bundle_relative_path(&spec.target_path);
     }
 }
 
-fn materialize_bundle_resources(base_dir: &Path, bundle: &BundleDocument) -> Result<(), Error> {
-    for (key, value) in &bundle.resources {
-        let spec = bundle.profile.resources().get(key).ok_or_else(|| {
+fn materialize_bundle_assets(base_dir: &Path, bundle: &BundleDocument) -> Result<(), Error> {
+    for (key, value) in &bundle.assets {
+        let spec = bundle.profile.assets().get(key).ok_or_else(|| {
             Error::InvalidBundle(format!(
-                "bundled profile is missing resource spec for '{}'",
+                "bundled profile is missing asset spec for '{}'",
                 key
             ))
         })?;
         let source_path = if spec.source_path.is_absolute() {
             return Err(Error::InvalidBundle(format!(
-                "bundled resource '{}' source_path must be relative",
+                "bundled asset '{}' source_path must be relative",
                 key
             )));
         } else {
@@ -512,7 +516,7 @@ fn materialize_bundle_resources(base_dir: &Path, bundle: &BundleDocument) -> Res
         }
         let content = STANDARD.decode(&value.content_base64).map_err(|err| {
             Error::InvalidBundle(format!(
-                "bundled resource '{}' content_base64 is invalid: {}",
+                "bundled asset '{}' content_base64 is invalid: {}",
                 key, err
             ))
         })?;
@@ -660,7 +664,7 @@ mod tests {
 name: local
 env_file: env.sec
 workdir: {}
-resources:
+assets:
   BUNDLED_DOCKER_COMPOSE_FILE:
     source_path: ./docker-compose.yml
     target_path: docker-compose.yml
@@ -711,10 +715,10 @@ run:
         let bundle_yaml = std::fs::read_to_string(&bundle_path).unwrap();
         assert!(bundle_yaml.contains("env:"));
         assert!(bundle_yaml.contains("files:"));
-        assert!(bundle_yaml.contains("resources:"));
+        assert!(bundle_yaml.contains("assets:"));
         assert!(bundle.env.contains_key("API_KEY"));
         assert!(bundle.files.contains_key("GOOGLE_APPLICATION_CREDENTIALS"));
-        assert!(bundle.resources.contains_key("BUNDLED_DOCKER_COMPOSE_FILE"));
+        assert!(bundle.assets.contains_key("BUNDLED_DOCKER_COMPOSE_FILE"));
         assert_eq!(
             bundle
                 .files
@@ -725,7 +729,7 @@ run:
         );
         assert_eq!(
             bundle
-                .resources
+                .assets
                 .get("BUNDLED_DOCKER_COMPOSE_FILE")
                 .unwrap()
                 .target_path,
@@ -752,7 +756,7 @@ run:
                 .exists()
         );
         let resource = extracted_profile
-            .resources()
+            .assets()
             .get("BUNDLED_DOCKER_COMPOSE_FILE")
             .unwrap();
         assert_eq!(resource.target_path, PathBuf::from("./docker-compose.yml"));

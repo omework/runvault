@@ -197,13 +197,13 @@ files:
     target_path: .runvault/gcp-service-account.json
     mode: "0600"
     cleanup: keep
-resources:
+assets:
   BUNDLED_DOCKER_COMPOSE_FILE:
     source_path: ./docker-compose.yml
     target_path: ./docker-compose.yml
     mode: "0644"
     cleanup: keep
-resource_registry:
+resources:
   caddy.main_config:
     type: file
     description: Main Caddy config
@@ -221,12 +221,12 @@ pings:
 
 If `env_file` is omitted, it defaults to `env.sec` next to `runvault.yaml`.
 
-Inside `runvault.yaml`, `resources:` uses profile field names:
+Inside `runvault.yaml`, `assets:` uses profile field names:
 
 - `source_path`
 - `target_path`
 
-`resource_registry:` is an optional shared registry for import-time references.
+`resources:` is an optional shared registry for import-time references.
 It supports `file` entries with `path` and `text` entries with `value`.
 
 ## Creating a profile folder
@@ -286,7 +286,7 @@ You can package a profile into a single file that contains:
 - bundle metadata
 - the profile YAML
 - the encrypted `env.sec` payload
-- bundled profile resources
+- bundled profile assets
 
 Export a bundle with:
 
@@ -315,8 +315,8 @@ Behavior:
 - `rollback --profile <path>` reruns the previous successful registered bundle for that profile's `name`
 - registry history is stored in `~/.runvault/registry.yaml` and version order follows deployment history, not semantic version sorting
 - password reuse for registered bundle execution uses the same global passphrase cache as normal profile operations
-- profile `resources:` are copied into the bundle and restored before execution
-- bundle schema version `1` uses structured YAML under top-level `env`, `files`, and `resources`
+- profile `assets:` are copied into the bundle and restored before execution
+- bundle schema version `1` uses structured YAML under top-level `env`, `files`, and `assets`
 - new visible vault writes use a wrapped per-profile key; older visible vault versions still load for compatibility
 - bundled relative target paths are normalized to explicit `./...` form and must not contain `..`
 
@@ -517,23 +517,25 @@ When `import env` sees one of these values, it:
 - looks up the same env key inside its `files:` map
 - imports that entry using the same semantics as `runvault import-files`
 
-## Importing resources from a YAML spec
+## Importing assets from a YAML spec
 
-You can bulk-load profile resources from a YAML file:
+You can bulk-load profile assets from a YAML file:
 
 ```bash
-runvault import resources deployments/ovh/services resources.yaml
+runvault import assets deployments/ovh/services assets.yaml
 ```
+
+The old `runvault import resources ...` command remains accepted as an alias.
 
 Spec format:
 
 ```yaml
-resource_registry:
+resources:
   caddy.main_config:
     type: file
     description: Main Caddy config
     path: ./Caddyfile
-resources:
+assets:
   BUNDLED_DOCKER_COMPOSE_FILE:
     src: "@caddy.main_config"
     to-file: ./docker-compose.yml
@@ -548,35 +550,35 @@ This import spec format is intentionally different from `runvault.yaml`:
 
 Behavior:
 
-- resources are written into `runvault.yaml`, not into `env.sec`
-- `resource_registry` entries in the spec are merged into `runvault.yaml`
-- resource specs can use direct `src`, `src: "@name"`, or legacy `ref`
-- `src: "@name"` looks up `name` in the profile resource registry first
+- assets are written into `runvault.yaml`, not into `env.sec`
+- `resources` entries in the spec are merged into `runvault.yaml`
+- asset specs can use direct `src`, `src: "@name"`, or legacy `ref`
+- `src: "@name"` looks up `name` in the profile resources registry first
 - if no registry entry exists, `src: "@name"` falls back to `name` as a source path relative to the spec file
 - multiple spec files are imported from left to right
-- later spec files overwrite earlier resource entries with the same key
+- later spec files overwrite earlier asset entries with the same key
 - relative `src` paths are resolved relative to the YAML spec file location
 - `~` in `src` paths is expanded against `$HOME`
 - imported `to-file` values become profile `target_path` entries
 - profile `target_path` is resolved from the profile workdir at runtime
-- when exporting a bundle, relative resource `source_path` values are looked up from the same effective workdir used by `run`, after resolving any relative workdir from the current process directory
-- when `workdir` is omitted, bundle export treats the current process directory as the lookup base for relative resource `source_path`
+- when exporting a bundle, relative asset `source_path` values are looked up from the same effective workdir used by `run`, after resolving any relative workdir from the current process directory
+- when `workdir` is omitted, bundle export treats the current process directory as the lookup base for relative asset `source_path`
 
-You can also import a single resource directly without a YAML spec:
+You can also import a single asset directly without a YAML spec:
 
 ```bash
-runvault -p deployments/home/workers import resources docker-compose.yml \
+runvault -p deployments/home/workers import assets docker-compose.yml \
   --to-file ./docker-compose.yml \
   --mode 0644
 ```
 
-Direct single-resource behavior:
+Direct single-asset behavior:
 
 - the positional argument is the source file path
 - `--to-file` is required
 - `--mode` is optional and defaults to `0600`
 - `--keep` / `--on-exit` control cleanup the same way as YAML specs
-- `--key KEY` is optional; when omitted, `runvault` derives a stable resource key from `--to-file`
+- `--key KEY` is optional; when omitted, `runvault` derives a stable asset key from `--to-file`
 
 ## Importing file-backed values from a YAML spec
 
@@ -613,7 +615,7 @@ files:
 File import specs can also define or reuse registry entries:
 
 ```yaml
-resource_registry:
+resources:
   app.namespace:
     type: text
     description: Shared app namespace
@@ -639,6 +641,8 @@ that are acceptable to keep in the profile.
 
 Quote `@...` values in YAML, because unquoted `@` is reserved by YAML parsers.
 The older `ref: name` notation is still accepted for compatibility.
+Legacy asset specs that used top-level `resources:` are still loaded; new specs
+should use `assets:` so `resources:` is reserved for registry entries.
 
 ## Listing resource registry entries
 

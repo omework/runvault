@@ -1,4 +1,7 @@
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{self, DeserializeOwned},
+};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -32,7 +35,7 @@ pub struct FileSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResourceSpec {
+pub struct AssetSpec {
     pub source_path: PathBuf,
     pub target_path: PathBuf,
     #[serde(default = "default_file_mode")]
@@ -72,16 +75,18 @@ pub struct FileImportSpec {
 pub struct FileImportDocument {
     #[serde(
         default,
+        rename = "resources",
+        alias = "resource_registry",
         alias = "resources_registry",
         skip_serializing_if = "BTreeMap::is_empty"
     )]
-    pub resource_registry: BTreeMap<String, ResourceRegistryEntry>,
+    pub resources: BTreeMap<String, ResourceRegistryEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub files: BTreeMap<String, FileImportSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResourceImportSpec {
+pub struct AssetImportSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub src: Option<PathBuf>,
     #[serde(
@@ -99,16 +104,18 @@ pub struct ResourceImportSpec {
     pub cleanup: FileCleanup,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct ResourceImportDocument {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+pub struct AssetImportDocument {
     #[serde(
         default,
+        rename = "resources",
+        alias = "resource_registry",
         alias = "resources_registry",
         skip_serializing_if = "BTreeMap::is_empty"
     )]
-    pub resource_registry: BTreeMap<String, ResourceRegistryEntry>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub resources: BTreeMap<String, ResourceImportSpec>,
+    pub resources: BTreeMap<String, ResourceRegistryEntry>,
+    #[serde(default, rename = "assets", skip_serializing_if = "BTreeMap::is_empty")]
+    pub assets: BTreeMap<String, AssetImportSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,7 +150,43 @@ impl ResourceRegistryEntry {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for AssetImportDocument {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawAssetImportDocument {
+            #[serde(default)]
+            assets: BTreeMap<String, AssetImportSpec>,
+            #[serde(default)]
+            resources: Option<serde_yaml::Value>,
+            #[serde(default)]
+            resource_registry: BTreeMap<String, ResourceRegistryEntry>,
+            #[serde(default)]
+            resources_registry: BTreeMap<String, ResourceRegistryEntry>,
+        }
+
+        let raw = RawAssetImportDocument::deserialize(deserializer)?;
+        let mut assets = raw.assets;
+        let mut resources = raw.resource_registry;
+        resources.extend(raw.resources_registry);
+
+        if let Some(value) = raw.resources {
+            if let Some(parsed_resources) =
+                parse_optional_yaml_map::<ResourceRegistryEntry, D::Error>(&value)?
+            {
+                resources.extend(parsed_resources);
+            } else {
+                assets.extend(parse_yaml_map::<AssetImportSpec, D::Error>(value)?);
+            }
+        }
+
+        Ok(Self { resources, assets })
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Profile {
     pub name: String,
     #[serde(default = "default_env_file")]
@@ -152,19 +195,77 @@ pub struct Profile {
     pub workdir: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub files: BTreeMap<String, FileSpec>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub resources: BTreeMap<String, ResourceSpec>,
+    #[serde(default, rename = "assets", skip_serializing_if = "BTreeMap::is_empty")]
+    pub assets: BTreeMap<String, AssetSpec>,
     #[serde(
         default,
+        rename = "resources",
+        alias = "resource_registry",
         alias = "resources_registry",
         skip_serializing_if = "BTreeMap::is_empty"
     )]
-    pub resource_registry: BTreeMap<String, ResourceRegistryEntry>,
+    pub resources: BTreeMap<String, ResourceRegistryEntry>,
     pub run: RunConfig,
     #[serde(default)]
     pub pings: Vec<PingTarget>,
     #[serde(skip)]
     pub(crate) implicit_workdir: bool,
+}
+
+impl<'de> Deserialize<'de> for Profile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawProfile {
+            name: String,
+            #[serde(default = "default_env_file")]
+            env_file: PathBuf,
+            #[serde(default)]
+            workdir: Option<PathBuf>,
+            #[serde(default)]
+            files: BTreeMap<String, FileSpec>,
+            #[serde(default)]
+            assets: BTreeMap<String, AssetSpec>,
+            #[serde(default)]
+            resources: Option<serde_yaml::Value>,
+            #[serde(default)]
+            resource_registry: BTreeMap<String, ResourceRegistryEntry>,
+            #[serde(default)]
+            resources_registry: BTreeMap<String, ResourceRegistryEntry>,
+            run: RunConfig,
+            #[serde(default)]
+            pings: Vec<PingTarget>,
+        }
+
+        let raw = RawProfile::deserialize(deserializer)?;
+        let mut assets = raw.assets;
+        let mut resources = raw.resource_registry;
+        resources.extend(raw.resources_registry);
+
+        if let Some(value) = raw.resources {
+            if let Some(parsed_resources) =
+                parse_optional_yaml_map::<ResourceRegistryEntry, D::Error>(&value)?
+            {
+                resources.extend(parsed_resources);
+            } else {
+                assets.extend(parse_yaml_map::<AssetSpec, D::Error>(value)?);
+            }
+        }
+
+        Ok(Self {
+            name: raw.name,
+            env_file: raw.env_file,
+            workdir: raw.workdir,
+            files: raw.files,
+            assets,
+            resources,
+            run: raw.run,
+            pings: raw.pings,
+            implicit_workdir: false,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,6 +313,27 @@ fn default_ping_interval_millis() -> u64 {
     500
 }
 
+fn parse_optional_yaml_map<T, E>(
+    value: &serde_yaml::Value,
+) -> Result<Option<BTreeMap<String, T>>, E>
+where
+    T: DeserializeOwned,
+    E: de::Error,
+{
+    match serde_yaml::from_value(value.clone()) {
+        Ok(map) => Ok(Some(map)),
+        Err(_) => Ok(None),
+    }
+}
+
+fn parse_yaml_map<T, E>(value: serde_yaml::Value) -> Result<BTreeMap<String, T>, E>
+where
+    T: DeserializeOwned,
+    E: de::Error,
+{
+    serde_yaml::from_value(value).map_err(E::custom)
+}
+
 impl Profile {
     pub fn from_path(path: &Path) -> Result<Self, Error> {
         let content = std::fs::read_to_string(path).map_err(|source| Error::ReadFile {
@@ -242,8 +364,8 @@ impl Profile {
         self.files.get(key)
     }
 
-    pub fn resources(&self) -> &BTreeMap<String, ResourceSpec> {
-        &self.resources
+    pub fn assets(&self) -> &BTreeMap<String, AssetSpec> {
+        &self.assets
     }
 
     pub fn upsert_file_spec(&mut self, key: &str, spec: FileSpec) {
@@ -263,7 +385,7 @@ impl Profile {
     }
 
     pub fn merge_resource_registry(&mut self, entries: BTreeMap<String, ResourceRegistryEntry>) {
-        self.resource_registry.extend(entries);
+        self.resources.extend(entries);
     }
 
     fn validate(&self) -> Result<(), Error> {
@@ -303,7 +425,7 @@ impl Profile {
             }
             parse_file_mode(&spec.mode)?;
         }
-        for (key, spec) in &self.resources {
+        for (key, spec) in &self.assets {
             if !validate_env_key(key) {
                 return Err(Error::InvalidProfile(format!(
                     "resource key '{}' is not a valid env key",
@@ -324,7 +446,7 @@ impl Profile {
             }
             parse_file_mode(&spec.mode)?;
         }
-        validate_resource_registry(&self.resource_registry)?;
+        validate_resource_registry(&self.resources)?;
         Ok(())
     }
 }
@@ -400,8 +522,8 @@ pub fn create_profile(path: &Path, options: &CreateProfileOptions) -> Result<Pat
         env_file,
         workdir: None,
         files: BTreeMap::new(),
+        assets: BTreeMap::new(),
         resources: BTreeMap::new(),
-        resource_registry: BTreeMap::new(),
         run: RunConfig {
             cmd: vec![
                 "echo".to_string(),
@@ -469,19 +591,19 @@ pub fn load_file_import_document(path: &Path) -> Result<FileImportDocument, Erro
     Ok(document)
 }
 
-pub fn load_resource_import_document(path: &Path) -> Result<ResourceImportDocument, Error> {
+pub fn load_asset_import_document(path: &Path) -> Result<AssetImportDocument, Error> {
     let content = std::fs::read_to_string(path).map_err(|source| Error::ReadFile {
         path: path.to_path_buf(),
         source,
     })?;
-    let mut document: ResourceImportDocument =
+    let mut document: AssetImportDocument =
         serde_yaml::from_str(&content).map_err(|source| Error::ImportSpecParse {
             path: path.to_path_buf(),
             source,
         })?;
     validate_resource_import_document(&document)?;
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
-    for spec in document.resources.values_mut() {
+    for spec in document.assets.values_mut() {
         if let Some(src) = &mut spec.src {
             if !is_at_source(src) {
                 *src = resolve_source_path(src, base_dir)?;
@@ -529,10 +651,10 @@ fn is_at_source(path: &Path) -> bool {
 }
 
 fn validate_file_import_document(document: &FileImportDocument) -> Result<(), Error> {
-    validate_resource_registry_import(&document.resource_registry)?;
-    if document.files.is_empty() && document.resource_registry.is_empty() {
+    validate_resource_registry_import(&document.resources)?;
+    if document.files.is_empty() && document.resources.is_empty() {
         return Err(Error::InvalidImportSpec(
-            "files or resource_registry must contain at least one entry".to_string(),
+            "files or resources must contain at least one entry".to_string(),
         ));
     }
     for (key, spec) in &document.files {
@@ -588,22 +710,22 @@ fn validate_file_import_document(document: &FileImportDocument) -> Result<(), Er
     Ok(())
 }
 
-fn validate_resource_import_document(document: &ResourceImportDocument) -> Result<(), Error> {
-    validate_resource_registry_import(&document.resource_registry)?;
-    if document.resources.is_empty() && document.resource_registry.is_empty() {
+fn validate_resource_import_document(document: &AssetImportDocument) -> Result<(), Error> {
+    validate_resource_registry_import(&document.resources)?;
+    if document.assets.is_empty() && document.resources.is_empty() {
         return Err(Error::InvalidImportSpec(
-            "resources or resource_registry must contain at least one entry".to_string(),
+            "assets or resources must contain at least one entry".to_string(),
         ));
     }
-    for (key, spec) in &document.resources {
+    for (key, spec) in &document.assets {
         if !validate_env_key(key) {
             return Err(Error::InvalidImportSpec(format!(
-                "resource import key '{}' is not a valid env key",
+                "asset import key '{}' is not a valid env key",
                 key
             )));
         }
         validate_import_source(
-            "resource import",
+            "asset import",
             key,
             spec.src.as_ref(),
             spec.ref_name.as_deref(),
@@ -611,7 +733,7 @@ fn validate_resource_import_document(document: &ResourceImportDocument) -> Resul
         if let Some(src) = &spec.src {
             if src.as_os_str().is_empty() {
                 return Err(Error::InvalidImportSpec(format!(
-                    "resource import '{}' src must not be empty",
+                    "asset import '{}' src must not be empty",
                     key
                 )));
             }
@@ -619,20 +741,20 @@ fn validate_resource_import_document(document: &ResourceImportDocument) -> Resul
         if let Some(ref_name) = &spec.ref_name {
             if ref_name.trim().is_empty() {
                 return Err(Error::InvalidImportSpec(format!(
-                    "resource import '{}' ref must not be empty",
+                    "asset import '{}' ref must not be empty",
                     key
                 )));
             }
         }
         if spec.src.is_none() && spec.ref_name.is_none() {
             return Err(Error::InvalidImportSpec(format!(
-                "resource import '{}' requires src or ref",
+                "asset import '{}' requires src or ref",
                 key
             )));
         }
         if spec.to_file.as_os_str().is_empty() {
             return Err(Error::InvalidImportSpec(format!(
-                "resource import '{}' to-file must not be empty",
+                "asset import '{}' to-file must not be empty",
                 key
             )));
         }
@@ -704,10 +826,10 @@ fn validate_resource_registry(
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateProfileOptions, DEFAULT_ENV_FILE, DEFAULT_PROFILE_DIR, DEFAULT_PROFILE_FILE,
-        FileCleanup, FileImportDocument, FileSpec, PingTarget, Profile, ResourceImportDocument,
-        ResourceSpec, create_profile, ensure_default_profile_exists, expand_user_home,
-        load_file_import_document, load_resource_import_document, resolve_profile_path,
+        AssetImportDocument, AssetSpec, CreateProfileOptions, DEFAULT_ENV_FILE,
+        DEFAULT_PROFILE_DIR, DEFAULT_PROFILE_FILE, FileCleanup, FileImportDocument, FileSpec,
+        PingTarget, Profile, create_profile, ensure_default_profile_exists, expand_user_home,
+        load_asset_import_document, load_file_import_document, resolve_profile_path,
         resolve_source_path, save_profile_to_path,
     };
     use crate::error::Error;
@@ -904,8 +1026,8 @@ pings:
             env_file: PathBuf::from(DEFAULT_ENV_FILE),
             workdir: Some(dir.path().to_path_buf()),
             files: BTreeMap::new(),
+            assets: BTreeMap::new(),
             resources: BTreeMap::new(),
-            resource_registry: BTreeMap::new(),
             run: super::RunConfig {
                 cmd: vec!["echo".to_string(), "ok".to_string()],
                 clear_env: true,
@@ -932,7 +1054,7 @@ pings:
     }
 
     #[test]
-    fn save_profile_persists_resources() {
+    fn save_profile_persists_assets() {
         let dir = tempdir().unwrap();
         let profile_path = dir.path().join(DEFAULT_PROFILE_FILE);
         let mut profile = Profile {
@@ -940,8 +1062,8 @@ pings:
             env_file: PathBuf::from(DEFAULT_ENV_FILE),
             workdir: Some(dir.path().to_path_buf()),
             files: BTreeMap::new(),
+            assets: BTreeMap::new(),
             resources: BTreeMap::new(),
-            resource_registry: BTreeMap::new(),
             run: super::RunConfig {
                 cmd: vec!["echo".to_string(), "ok".to_string()],
                 clear_env: true,
@@ -950,9 +1072,9 @@ pings:
             pings: Vec::new(),
             implicit_workdir: true,
         };
-        profile.resources.insert(
+        profile.assets.insert(
             "BUNDLED_DOCKER_COMPOSE_FILE".to_string(),
-            ResourceSpec {
+            AssetSpec {
                 source_path: PathBuf::from("./docker-compose.yml"),
                 target_path: PathBuf::from("./docker-compose.yml"),
                 mode: "0644".to_string(),
@@ -963,13 +1085,51 @@ pings:
         save_profile_to_path(&profile_path, &profile).unwrap();
         let reloaded = Profile::from_path(&profile_path).unwrap();
         let spec = reloaded
-            .resources()
+            .assets()
             .get("BUNDLED_DOCKER_COMPOSE_FILE")
             .unwrap();
         assert_eq!(spec.source_path, PathBuf::from("./docker-compose.yml"));
         assert_eq!(spec.target_path, PathBuf::from("./docker-compose.yml"));
         assert_eq!(spec.mode, "0644");
         assert_eq!(spec.cleanup, FileCleanup::Keep);
+    }
+
+    #[test]
+    fn profile_loads_legacy_resources_as_assets() {
+        let profile: Profile = serde_yaml::from_str(
+            r#"
+name: local
+resources:
+  BUNDLED_DOCKER_COMPOSE_FILE:
+    source_path: ./docker-compose.yml
+    target_path: ./docker-compose.yml
+run:
+  cmd: ["true"]
+"#,
+        )
+        .unwrap();
+
+        assert!(profile.resources.is_empty());
+        assert!(profile.assets().contains_key("BUNDLED_DOCKER_COMPOSE_FILE"));
+    }
+
+    #[test]
+    fn profile_loads_resources_as_registry_entries() {
+        let profile: Profile = serde_yaml::from_str(
+            r#"
+name: local
+resources:
+  app.namespace:
+    type: text
+    value: glt-market
+run:
+  cmd: ["true"]
+"#,
+        )
+        .unwrap();
+
+        assert!(profile.assets().is_empty());
+        assert!(profile.resources.contains_key("app.namespace"));
     }
 
     #[test]
@@ -980,8 +1140,8 @@ pings:
             env_file: PathBuf::from(DEFAULT_ENV_FILE),
             workdir: Some(dir.path().to_path_buf()),
             files: BTreeMap::new(),
+            assets: BTreeMap::new(),
             resources: BTreeMap::new(),
-            resource_registry: BTreeMap::new(),
             run: super::RunConfig {
                 cmd: vec!["echo".to_string(), "ok".to_string()],
                 clear_env: true,
@@ -1047,7 +1207,7 @@ files:
         assert!(matches!(err, Error::InvalidImportSpec(_)));
         assert!(
             err.to_string()
-                .contains("files or resource_registry must contain at least one entry")
+                .contains("files or resources must contain at least one entry")
         );
     }
 
@@ -1094,7 +1254,7 @@ files:
     fn file_import_document_accepts_resource_registry_refs() {
         let document: FileImportDocument = serde_yaml::from_str(
             r#"
-resource_registry:
+resources:
   postgres.password:
     type: text
     description: Shared Postgres password
@@ -1108,7 +1268,7 @@ files:
 
         let spec = document.files.get("POSTGRES_PASSWORD").unwrap();
         assert_eq!(spec.ref_name.as_deref(), Some("postgres.password"));
-        let entry = document.resource_registry.get("postgres.password").unwrap();
+        let entry = document.resources.get("postgres.password").unwrap();
         assert_eq!(entry.kind(), "text");
         assert_eq!(entry.description(), Some("Shared Postgres password"));
     }
@@ -1171,13 +1331,13 @@ files:
     }
 
     #[test]
-    fn loads_resource_import_document_and_resolves_relative_src_paths() {
+    fn loads_asset_import_document_and_resolves_relative_src_paths() {
         let dir = tempdir().unwrap();
-        let spec_path = dir.path().join("resources.yaml");
+        let spec_path = dir.path().join("assets.yaml");
         std::fs::write(
             &spec_path,
             r#"
-resources:
+assets:
   BUNDLED_DOCKER_COMPOSE_FILE:
     src: ../docker-compose.yml
     to-file: ./docker-compose.yml
@@ -1187,11 +1347,8 @@ resources:
         )
         .unwrap();
 
-        let document = load_resource_import_document(&spec_path).unwrap();
-        let spec = document
-            .resources
-            .get("BUNDLED_DOCKER_COMPOSE_FILE")
-            .unwrap();
+        let document = load_asset_import_document(&spec_path).unwrap();
+        let spec = document.assets.get("BUNDLED_DOCKER_COMPOSE_FILE").unwrap();
         assert_eq!(spec.src, Some(dir.path().join("../docker-compose.yml")));
         assert_eq!(spec.to_file, PathBuf::from("./docker-compose.yml"));
         assert_eq!(spec.mode, "0644");
@@ -1199,22 +1356,41 @@ resources:
     }
 
     #[test]
-    fn rejects_empty_resource_import_document() {
+    fn rejects_empty_asset_import_document() {
         let dir = tempdir().unwrap();
-        let spec_path = dir.path().join("resources.yaml");
-        std::fs::write(&spec_path, "resources: {}\n").unwrap();
+        let spec_path = dir.path().join("assets.yaml");
+        std::fs::write(&spec_path, "assets: {}\n").unwrap();
 
-        let err = load_resource_import_document(&spec_path).unwrap_err();
+        let err = load_asset_import_document(&spec_path).unwrap_err();
         assert!(matches!(err, Error::InvalidImportSpec(_)));
         assert!(
             err.to_string()
-                .contains("resources or resource_registry must contain at least one entry")
+                .contains("assets or resources must contain at least one entry")
         );
     }
 
     #[test]
-    fn resource_import_document_defaults_mode_and_cleanup() {
-        let document: ResourceImportDocument = serde_yaml::from_str(
+    fn asset_import_document_defaults_mode_and_cleanup() {
+        let document: AssetImportDocument = serde_yaml::from_str(
+            r#"
+assets:
+  BUNDLED_DOCKER_COMPOSE_FILE:
+    src: ./docker-compose.yml
+    to-file: ./docker-compose.yml
+"#,
+        )
+        .unwrap();
+
+        let spec = document.assets.get("BUNDLED_DOCKER_COMPOSE_FILE").unwrap();
+        assert_eq!(spec.src, Some(PathBuf::from("./docker-compose.yml")));
+        assert_eq!(spec.to_file, PathBuf::from("./docker-compose.yml"));
+        assert_eq!(spec.mode, "0600");
+        assert_eq!(spec.cleanup, FileCleanup::OnExit);
+    }
+
+    #[test]
+    fn asset_import_document_loads_legacy_resources_as_assets() {
+        let document: AssetImportDocument = serde_yaml::from_str(
             r#"
 resources:
   BUNDLED_DOCKER_COMPOSE_FILE:
@@ -1224,21 +1400,15 @@ resources:
         )
         .unwrap();
 
-        let spec = document
-            .resources
-            .get("BUNDLED_DOCKER_COMPOSE_FILE")
-            .unwrap();
-        assert_eq!(spec.src, Some(PathBuf::from("./docker-compose.yml")));
-        assert_eq!(spec.to_file, PathBuf::from("./docker-compose.yml"));
-        assert_eq!(spec.mode, "0600");
-        assert_eq!(spec.cleanup, FileCleanup::OnExit);
+        assert!(document.resources.is_empty());
+        assert!(document.assets.contains_key("BUNDLED_DOCKER_COMPOSE_FILE"));
     }
 
     #[test]
-    fn resource_import_document_accepts_registry_only_specs() {
-        let document: ResourceImportDocument = serde_yaml::from_str(
+    fn asset_import_document_accepts_registry_only_specs() {
+        let document: AssetImportDocument = serde_yaml::from_str(
             r#"
-resource_registry:
+resources:
   caddy.main_config:
     type: file
     description: Main Caddy config
@@ -1247,17 +1417,17 @@ resource_registry:
         )
         .unwrap();
 
-        assert!(document.resources.is_empty());
-        let entry = document.resource_registry.get("caddy.main_config").unwrap();
+        assert!(document.assets.is_empty());
+        let entry = document.resources.get("caddy.main_config").unwrap();
         assert_eq!(entry.kind(), "file");
         assert_eq!(entry.description(), Some("Main Caddy config"));
     }
 
     #[test]
-    fn resource_import_document_preserves_at_sources_for_late_resolution() {
-        let document: ResourceImportDocument = serde_yaml::from_str(
+    fn asset_import_document_preserves_at_sources_for_late_resolution() {
+        let document: AssetImportDocument = serde_yaml::from_str(
             r#"
-resources:
+assets:
   CADDY_CONFIG_FILE:
     src: "@caddy.main_config"
     to-file: ./Caddyfile
@@ -1265,7 +1435,7 @@ resources:
         )
         .unwrap();
 
-        let spec = document.resources.get("CADDY_CONFIG_FILE").unwrap();
+        let spec = document.assets.get("CADDY_CONFIG_FILE").unwrap();
         assert_eq!(spec.src, Some(PathBuf::from("@caddy.main_config")));
     }
 

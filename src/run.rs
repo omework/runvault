@@ -208,8 +208,7 @@ fn materialize_loaded_env(
 ) -> Result<LoadedProfileEnv, Error> {
     let workdir = resolve_workdir(profile, execution_dir);
     let mut envs = BTreeMap::new();
-    let mut mounted_files =
-        materialize_profile_resources(profile_path, profile, &workdir, &password)?;
+    let mut mounted_files = materialize_profile_assets(profile_path, profile, &workdir, &password)?;
 
     for (key, value) in values {
         match value {
@@ -264,7 +263,7 @@ fn materialize_loaded_env(
     })
 }
 
-fn materialize_profile_resources(
+fn materialize_profile_assets(
     profile_path: &Path,
     profile: &Profile,
     workdir: &Path,
@@ -277,7 +276,7 @@ fn materialize_profile_resources(
     };
     let mut mounted_files = Vec::new();
 
-    for (key, spec) in profile.resources() {
+    for (key, spec) in profile.assets() {
         let resolved_source_path = resolve_source_path(&spec.source_path, profile_dir)?;
         let raw_content = fs::read(&resolved_source_path).map_err(|source| Error::ReadFile {
             path: resolved_source_path,
@@ -499,7 +498,7 @@ mod tests {
     };
     use crate::{
         error::Error,
-        profile::{FileCleanup, FileSpec, PingTarget, Profile, ResourceSpec, RunConfig},
+        profile::{AssetSpec, FileCleanup, FileSpec, PingTarget, Profile, RunConfig},
         vault::{VaultDocument, VaultValue, save_vault_with_password},
     };
     use age::secrecy::{ExposeSecret, SecretString};
@@ -520,8 +519,8 @@ mod tests {
             env_file: PathBuf::from("secret.env.enc"),
             workdir: Some(workdir),
             files: BTreeMap::new(),
+            assets: BTreeMap::new(),
             resources: BTreeMap::new(),
-            resource_registry: BTreeMap::new(),
             run: RunConfig {
                 cmd: vec![
                     "/bin/sh".to_string(),
@@ -886,16 +885,16 @@ run:
     }
 
     #[test]
-    fn materialize_loaded_env_materializes_profile_resources() {
+    fn materialize_loaded_env_materializes_profile_assets() {
         let dir = tempdir().unwrap();
-        let resource_source = dir.path().join("docker-compose.yml");
+        let asset_source = dir.path().join("docker-compose.yml");
         let runtime_compose = dir.path().join("runtime").join("docker-compose.yml");
-        std::fs::write(&resource_source, "services: {}\n").unwrap();
+        std::fs::write(&asset_source, "services: {}\n").unwrap();
 
         let mut profile = test_profile(dir.path().join("runtime"));
-        profile.resources.insert(
+        profile.assets.insert(
             "BUNDLED_DOCKER_COMPOSE_FILE".to_string(),
-            ResourceSpec {
+            AssetSpec {
                 source_path: PathBuf::from("./docker-compose.yml"),
                 target_path: PathBuf::from("./docker-compose.yml"),
                 mode: "0644".to_string(),
@@ -921,9 +920,9 @@ run:
     }
 
     #[test]
-    fn materialize_loaded_env_decrypts_encrypted_profile_resources() {
+    fn materialize_loaded_env_decrypts_encrypted_profile_assets() {
         let dir = tempdir().unwrap();
-        let resource_source = dir.path().join("server.key.pem");
+        let asset_source = dir.path().join("server.key.pem");
         let runtime_key = dir.path().join("runtime").join("server.key.pem");
         let key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
         let encrypted = key
@@ -932,12 +931,12 @@ run:
                 test_password().expose_secret().as_bytes(),
             )
             .unwrap();
-        std::fs::write(&resource_source, encrypted).unwrap();
+        std::fs::write(&asset_source, encrypted).unwrap();
 
         let mut profile = test_profile(dir.path().join("runtime"));
-        profile.resources.insert(
+        profile.assets.insert(
             "SERVER_KEY".to_string(),
-            ResourceSpec {
+            AssetSpec {
                 source_path: PathBuf::from("./server.key.pem"),
                 target_path: PathBuf::from("./server.key.pem"),
                 mode: "0600".to_string(),
