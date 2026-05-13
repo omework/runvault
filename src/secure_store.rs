@@ -48,7 +48,7 @@ pub fn store_password(profile_path: &Path, password: &SecretString) -> Result<()
     #[cfg(target_os = "macos")]
     {
         let account = store_key(profile_path)?;
-        let status = Command::new("security")
+        let output = Command::new("security")
             .args([
                 "add-generic-password",
                 "-U",
@@ -59,11 +59,17 @@ pub fn store_password(profile_path: &Path, password: &SecretString) -> Result<()
                 "-w",
                 password.expose_secret(),
             ])
-            .status()
+            .output()
             .map_err(|err| Error::SecureStore(err.to_string()))?;
-        if !status.success() {
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let details = if stderr.is_empty() {
+                format!("status {}", output.status)
+            } else {
+                format!("status {}; {}", output.status, stderr)
+            };
             return Err(Error::SecureStore(format!(
-                "security add-generic-password failed with status {status}"
+                "security add-generic-password failed with {details}"
             )));
         }
         return Ok(());
@@ -82,14 +88,7 @@ pub fn store_password_if_possible(
 ) -> Result<(), Error> {
     match store_password(profile_path, password) {
         Ok(()) => Ok(()),
-        Err(Error::SecureStore(message)) if is_noninteractive_keychain_error(&message) => {
-            eprintln!(
-                "warning: macOS Keychain rejected password caching for {} ({}); continuing without secure-store cache",
-                profile_path.display(),
-                message
-            );
-            Ok(())
-        }
+        Err(Error::SecureStore(message)) if is_noninteractive_keychain_error(&message) => Ok(()),
         Err(err) => Err(err),
     }
 }
