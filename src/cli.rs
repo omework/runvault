@@ -26,6 +26,7 @@ pub enum Command {
     Pki(PkiCommand),
     Import(ImportCommand),
     ImportFiles(ImportFilesArgs),
+    Resources(ResourcesCommand),
     Delete(DeleteArgs),
     Unset(UnsetArgs),
     UnsetFrom(UnsetFromArgs),
@@ -222,6 +223,22 @@ pub struct ImportResourcesArgs {
 pub struct ImportFilesArgs {
     #[arg(value_name = "PROFILE_OR_INPUT", num_args = 1..)]
     pub targets: Vec<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct ResourcesCommand {
+    #[command(subcommand)]
+    pub command: ResourcesSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ResourcesSubcommand {
+    List(ResourcesListArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ResourcesListArgs {
+    pub profile: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -451,6 +468,15 @@ impl ImportFilesArgs {
     }
 }
 
+impl ResourcesListArgs {
+    pub fn profile_or_default(&self, global_profile: Option<&PathBuf>) -> PathBuf {
+        global_profile
+            .cloned()
+            .or_else(|| self.profile.clone())
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR))
+    }
+}
+
 impl DeleteArgs {
     pub fn resolve(&self, global_profile: Option<&PathBuf>) -> (PathBuf, String) {
         match self.targets.as_slice() {
@@ -597,7 +623,7 @@ fn looks_like_profile_path(path: &PathBuf) -> bool {
 mod tests {
     use super::{
         Cli, CmdSubcommand, Command, DEFAULT_PROFILE_DIR, ImportSubcommand, PingSubcommand,
-        PkiSubcommand,
+        PkiSubcommand, ResourcesSubcommand,
     };
     use clap::Parser;
     use std::{
@@ -1110,6 +1136,21 @@ mod tests {
         assert_eq!(
             inputs,
             vec![PathBuf::from("files-a.yaml"), PathBuf::from("files-b.yaml")]
+        );
+    }
+
+    #[test]
+    fn resources_list_defaults_to_dot_vault() {
+        let cli = Cli::try_parse_from(["runvault", "resources", "list"]).unwrap();
+
+        let Command::Resources(args) = cli.command else {
+            panic!("expected resources command");
+        };
+        let ResourcesSubcommand::List(args) = args.command;
+
+        assert_eq!(
+            args.profile_or_default(None),
+            PathBuf::from(DEFAULT_PROFILE_DIR)
         );
     }
 

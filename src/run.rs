@@ -521,6 +521,7 @@ mod tests {
             workdir: Some(workdir),
             files: BTreeMap::new(),
             resources: BTreeMap::new(),
+            resource_registry: BTreeMap::new(),
             run: RunConfig {
                 cmd: vec![
                     "/bin/sh".to_string(),

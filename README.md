@@ -203,6 +203,15 @@ resources:
     target_path: ./docker-compose.yml
     mode: "0644"
     cleanup: keep
+resource_registry:
+  caddy.main_config:
+    type: file
+    description: Main Caddy config
+    path: ./Caddyfile
+  app.namespace:
+    type: text
+    description: Shared app namespace
+    value: glt-market
 pings:
   - name: api
     url: http://127.0.0.1:8080/health
@@ -216,6 +225,9 @@ Inside `runvault.yaml`, `resources:` uses profile field names:
 
 - `source_path`
 - `target_path`
+
+`resource_registry:` is an optional shared registry for import-time references.
+It supports `file` entries with `path` and `text` entries with `value`.
 
 ## Creating a profile folder
 
@@ -516,9 +528,14 @@ runvault import resources deployments/ovh/services resources.yaml
 Spec format:
 
 ```yaml
+resource_registry:
+  caddy.main_config:
+    type: file
+    description: Main Caddy config
+    path: ./Caddyfile
 resources:
   BUNDLED_DOCKER_COMPOSE_FILE:
-    src: ./docker-compose.yml
+    src: "@caddy.main_config"
     to-file: ./docker-compose.yml
     mode: "0644"
     cleanup: keep
@@ -532,6 +549,10 @@ This import spec format is intentionally different from `runvault.yaml`:
 Behavior:
 
 - resources are written into `runvault.yaml`, not into `env.sec`
+- `resource_registry` entries in the spec are merged into `runvault.yaml`
+- resource specs can use direct `src`, `src: "@name"`, or legacy `ref`
+- `src: "@name"` looks up `name` in the profile resource registry first
+- if no registry entry exists, `src: "@name"` falls back to `name` as a source path relative to the spec file
 - multiple spec files are imported from left to right
 - later spec files overwrite earlier resource entries with the same key
 - relative `src` paths are resolved relative to the YAML spec file location
@@ -588,6 +609,47 @@ files:
   FIREBASE_JSON:
     src: ../firebase/service-account.json
 ```
+
+File import specs can also define or reuse registry entries:
+
+```yaml
+resource_registry:
+  app.namespace:
+    type: text
+    description: Shared app namespace
+    value: glt-market
+  service.ca:
+    type: file
+    description: Service CA certificate
+    path: pki://ca/crt.pem
+files:
+  APP_ID:
+    src: "@app.namespace"
+  SERVICE_CA_CRT:
+    src: "@service.ca"
+    to-file: /home/debian/mata35/pki/root.crt.pem
+    mode: "0644"
+    cleanup: keep
+```
+
+For `runvault import-files`, `file` refs behave like `src`; `text` refs behave
+like inline values and are stored encrypted in `env.sec`. Registry `value`
+fields are visible in `runvault.yaml`, so use `text` entries only for values
+that are acceptable to keep in the profile.
+
+Quote `@...` values in YAML, because unquoted `@` is reserved by YAML parsers.
+The older `ref: name` notation is still accepted for compatibility.
+
+## Listing resource registry entries
+
+Show the resources registered in a profile:
+
+```bash
+runvault resources list deployments/ovh/services
+runvault -p deployments/ovh/services resources list
+```
+
+Output includes the registry name, type, and description.
 
 Behavior:
 

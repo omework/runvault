@@ -4,7 +4,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{envfile::validate_env_key, error::Error, pki};
+use crate::{
+    envfile::{parse_reference_value, validate_env_key},
+    error::Error,
+    pki,
+};
 
 pub const DEFAULT_PROFILE_FILE: &str = "runvault.yaml";
 pub const DEFAULT_ENV_FILE: &str = "env.sec";
@@ -39,7 +43,15 @@ pub struct ResourceSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileImportSpec {
-    pub src: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src: Option<PathBuf>,
+    #[serde(
+        default,
+        rename = "ref",
+        alias = "resource",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ref_name: Option<String>,
     #[serde(
         default,
         rename = "to-file",
@@ -52,17 +64,33 @@ pub struct FileImportSpec {
     pub mode: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<FileCleanup>,
+    #[serde(skip)]
+    pub(crate) resolved_value: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct FileImportDocument {
+    #[serde(
+        default,
+        alias = "resources_registry",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub resource_registry: BTreeMap<String, ResourceRegistryEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub files: BTreeMap<String, FileImportSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceImportSpec {
-    pub src: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src: Option<PathBuf>,
+    #[serde(
+        default,
+        rename = "ref",
+        alias = "resource",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ref_name: Option<String>,
     #[serde(rename = "to-file", alias = "to_file", alias = "target_path")]
     pub to_file: PathBuf,
     #[serde(default = "default_file_mode")]
@@ -73,8 +101,46 @@ pub struct ResourceImportSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ResourceImportDocument {
+    #[serde(
+        default,
+        alias = "resources_registry",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub resource_registry: BTreeMap<String, ResourceRegistryEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub resources: BTreeMap<String, ResourceImportSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResourceRegistryEntry {
+    File {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        path: PathBuf,
+    },
+    Text {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        value: String,
+    },
+}
+
+impl ResourceRegistryEntry {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::File { .. } => "file",
+            Self::Text { .. } => "text",
+        }
+    }
+
+    pub fn description(&self) -> Option<&str> {
+        match self {
+            Self::File { description, .. } | Self::Text { description, .. } => {
+                description.as_deref()
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +154,12 @@ pub struct Profile {
     pub files: BTreeMap<String, FileSpec>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub resources: BTreeMap<String, ResourceSpec>,
+    #[serde(
+        default,
+        alias = "resources_registry",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub resource_registry: BTreeMap<String, ResourceRegistryEntry>,
     pub run: RunConfig,
     #[serde(default)]
     pub pings: Vec<PingTarget>,
@@ -190,6 +262,10 @@ impl Profile {
         }
     }
 
+    pub fn merge_resource_registry(&mut self, entries: BTreeMap<String, ResourceRegistryEntry>) {
+        self.resource_registry.extend(entries);
+    }
+
     fn validate(&self) -> Result<(), Error> {
         if self.name.trim().is_empty() {
             return Err(Error::InvalidProfile("name must not be empty".to_string()));
@@ -248,6 +324,7 @@ impl Profile {
             }
             parse_file_mode(&spec.mode)?;
         }
+        validate_resource_registry(&self.resource_registry)?;
         Ok(())
     }
 }
@@ -324,6 +401,7 @@ pub fn create_profile(path: &Path, options: &CreateProfileOptions) -> Result<Pat
         workdir: None,
         files: BTreeMap::new(),
         resources: BTreeMap::new(),
+        resource_registry: BTreeMap::new(),
         run: RunConfig {
             cmd: vec![
                 "echo".to_string(),
@@ -382,7 +460,11 @@ pub fn load_file_import_document(path: &Path) -> Result<FileImportDocument, Erro
     validate_file_import_document(&document)?;
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
     for spec in document.files.values_mut() {
-        spec.src = resolve_source_path(&spec.src, base_dir)?;
+        if let Some(src) = &mut spec.src {
+            if !is_at_source(src) {
+                *src = resolve_source_path(src, base_dir)?;
+            }
+        }
     }
     Ok(document)
 }
@@ -400,7 +482,11 @@ pub fn load_resource_import_document(path: &Path) -> Result<ResourceImportDocume
     validate_resource_import_document(&document)?;
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
     for spec in document.resources.values_mut() {
-        spec.src = resolve_source_path(&spec.src, base_dir)?;
+        if let Some(src) = &mut spec.src {
+            if !is_at_source(src) {
+                *src = resolve_source_path(src, base_dir)?;
+            }
+        }
     }
     Ok(document)
 }
@@ -436,10 +522,17 @@ pub fn resolve_source_path(path: &Path, base_dir: &Path) -> Result<PathBuf, Erro
     }
 }
 
+fn is_at_source(path: &Path) -> bool {
+    path.to_str()
+        .and_then(parse_reference_value)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
 fn validate_file_import_document(document: &FileImportDocument) -> Result<(), Error> {
-    if document.files.is_empty() {
+    validate_resource_registry_import(&document.resource_registry)?;
+    if document.files.is_empty() && document.resource_registry.is_empty() {
         return Err(Error::InvalidImportSpec(
-            "files must contain at least one entry".to_string(),
+            "files or resource_registry must contain at least one entry".to_string(),
         ));
     }
     for (key, spec) in &document.files {
@@ -449,9 +542,31 @@ fn validate_file_import_document(document: &FileImportDocument) -> Result<(), Er
                 key
             )));
         }
-        if spec.src.as_os_str().is_empty() {
+        validate_import_source(
+            "file import",
+            key,
+            spec.src.as_ref(),
+            spec.ref_name.as_deref(),
+        )?;
+        if let Some(src) = &spec.src {
+            if src.as_os_str().is_empty() {
+                return Err(Error::InvalidImportSpec(format!(
+                    "file import '{}' src must not be empty",
+                    key
+                )));
+            }
+        }
+        if let Some(ref_name) = &spec.ref_name {
+            if ref_name.trim().is_empty() {
+                return Err(Error::InvalidImportSpec(format!(
+                    "file import '{}' ref must not be empty",
+                    key
+                )));
+            }
+        }
+        if spec.src.is_none() && spec.ref_name.is_none() {
             return Err(Error::InvalidImportSpec(format!(
-                "file import '{}' src must not be empty",
+                "file import '{}' requires src or ref",
                 key
             )));
         }
@@ -474,9 +589,10 @@ fn validate_file_import_document(document: &FileImportDocument) -> Result<(), Er
 }
 
 fn validate_resource_import_document(document: &ResourceImportDocument) -> Result<(), Error> {
-    if document.resources.is_empty() {
+    validate_resource_registry_import(&document.resource_registry)?;
+    if document.resources.is_empty() && document.resource_registry.is_empty() {
         return Err(Error::InvalidImportSpec(
-            "resources must contain at least one entry".to_string(),
+            "resources or resource_registry must contain at least one entry".to_string(),
         ));
     }
     for (key, spec) in &document.resources {
@@ -486,9 +602,31 @@ fn validate_resource_import_document(document: &ResourceImportDocument) -> Resul
                 key
             )));
         }
-        if spec.src.as_os_str().is_empty() {
+        validate_import_source(
+            "resource import",
+            key,
+            spec.src.as_ref(),
+            spec.ref_name.as_deref(),
+        )?;
+        if let Some(src) = &spec.src {
+            if src.as_os_str().is_empty() {
+                return Err(Error::InvalidImportSpec(format!(
+                    "resource import '{}' src must not be empty",
+                    key
+                )));
+            }
+        }
+        if let Some(ref_name) = &spec.ref_name {
+            if ref_name.trim().is_empty() {
+                return Err(Error::InvalidImportSpec(format!(
+                    "resource import '{}' ref must not be empty",
+                    key
+                )));
+            }
+        }
+        if spec.src.is_none() && spec.ref_name.is_none() {
             return Err(Error::InvalidImportSpec(format!(
-                "resource import '{}' src must not be empty",
+                "resource import '{}' requires src or ref",
                 key
             )));
         }
@@ -499,6 +637,66 @@ fn validate_resource_import_document(document: &ResourceImportDocument) -> Resul
             )));
         }
         parse_file_mode(&spec.mode)?;
+    }
+    Ok(())
+}
+
+fn validate_resource_registry_import(
+    registry: &BTreeMap<String, ResourceRegistryEntry>,
+) -> Result<(), Error> {
+    for (name, entry) in registry {
+        if name.trim().is_empty() {
+            return Err(Error::InvalidImportSpec(
+                "resource registry name must not be empty".to_string(),
+            ));
+        }
+        if let ResourceRegistryEntry::File { path, .. } = entry {
+            if path.as_os_str().is_empty() {
+                return Err(Error::InvalidImportSpec(format!(
+                    "resource registry file '{}' path must not be empty",
+                    name
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_import_source(
+    kind: &str,
+    key: &str,
+    src: Option<&PathBuf>,
+    ref_name: Option<&str>,
+) -> Result<(), Error> {
+    if src.is_some() && ref_name.is_some() {
+        return Err(Error::InvalidImportSpec(format!(
+            "{} '{}' must not set both src and ref",
+            kind, key
+        )));
+    }
+    Ok(())
+}
+
+fn validate_resource_registry(
+    registry: &BTreeMap<String, ResourceRegistryEntry>,
+) -> Result<(), Error> {
+    for (name, entry) in registry {
+        if name.trim().is_empty() {
+            return Err(Error::InvalidProfile(
+                "resource registry name must not be empty".to_string(),
+            ));
+        }
+        match entry {
+            ResourceRegistryEntry::File { path, .. } => {
+                if path.as_os_str().is_empty() {
+                    return Err(Error::InvalidProfile(format!(
+                        "resource registry file '{}' path must not be empty",
+                        name
+                    )));
+                }
+            }
+            ResourceRegistryEntry::Text { .. } => {}
+        }
     }
     Ok(())
 }
@@ -707,6 +905,7 @@ pings:
             workdir: Some(dir.path().to_path_buf()),
             files: BTreeMap::new(),
             resources: BTreeMap::new(),
+            resource_registry: BTreeMap::new(),
             run: super::RunConfig {
                 cmd: vec!["echo".to_string(), "ok".to_string()],
                 clear_env: true,
@@ -742,6 +941,7 @@ pings:
             workdir: Some(dir.path().to_path_buf()),
             files: BTreeMap::new(),
             resources: BTreeMap::new(),
+            resource_registry: BTreeMap::new(),
             run: super::RunConfig {
                 cmd: vec!["echo".to_string(), "ok".to_string()],
                 clear_env: true,
@@ -781,6 +981,7 @@ pings:
             workdir: Some(dir.path().to_path_buf()),
             files: BTreeMap::new(),
             resources: BTreeMap::new(),
+            resource_registry: BTreeMap::new(),
             run: super::RunConfig {
                 cmd: vec!["echo".to_string(), "ok".to_string()],
                 clear_env: true,
@@ -827,7 +1028,7 @@ files:
 
         let document = load_file_import_document(&spec_path).unwrap();
         let spec = document.files.get("SERVICE_CA_CRT").unwrap();
-        assert_eq!(spec.src, dir.path().join("../pki/root.crt.pem"));
+        assert_eq!(spec.src, Some(dir.path().join("../pki/root.crt.pem")));
         assert_eq!(
             spec.to_file.as_ref().unwrap(),
             &PathBuf::from("/home/debian/mata35/pki/root.crt.pem")
@@ -846,7 +1047,7 @@ files:
         assert!(matches!(err, Error::InvalidImportSpec(_)));
         assert!(
             err.to_string()
-                .contains("files must contain at least one entry")
+                .contains("files or resource_registry must contain at least one entry")
         );
     }
 
@@ -883,10 +1084,48 @@ files:
         .unwrap();
 
         let spec = document.files.get("FIREBASE_JSON").unwrap();
-        assert_eq!(spec.src, PathBuf::from("./firebase.json"));
+        assert_eq!(spec.src, Some(PathBuf::from("./firebase.json")));
         assert_eq!(spec.to_file, None);
         assert_eq!(spec.mode, "0600");
         assert_eq!(spec.cleanup, None);
+    }
+
+    #[test]
+    fn file_import_document_accepts_resource_registry_refs() {
+        let document: FileImportDocument = serde_yaml::from_str(
+            r#"
+resource_registry:
+  postgres.password:
+    type: text
+    description: Shared Postgres password
+    value: secret
+files:
+  POSTGRES_PASSWORD:
+    ref: postgres.password
+"#,
+        )
+        .unwrap();
+
+        let spec = document.files.get("POSTGRES_PASSWORD").unwrap();
+        assert_eq!(spec.ref_name.as_deref(), Some("postgres.password"));
+        let entry = document.resource_registry.get("postgres.password").unwrap();
+        assert_eq!(entry.kind(), "text");
+        assert_eq!(entry.description(), Some("Shared Postgres password"));
+    }
+
+    #[test]
+    fn file_import_document_preserves_at_sources_for_late_resolution() {
+        let document: FileImportDocument = serde_yaml::from_str(
+            r#"
+files:
+  APP_ID:
+    src: "@app.namespace"
+"#,
+        )
+        .unwrap();
+
+        let spec = document.files.get("APP_ID").unwrap();
+        assert_eq!(spec.src, Some(PathBuf::from("@app.namespace")));
     }
 
     #[test]
@@ -953,7 +1192,7 @@ resources:
             .resources
             .get("BUNDLED_DOCKER_COMPOSE_FILE")
             .unwrap();
-        assert_eq!(spec.src, dir.path().join("../docker-compose.yml"));
+        assert_eq!(spec.src, Some(dir.path().join("../docker-compose.yml")));
         assert_eq!(spec.to_file, PathBuf::from("./docker-compose.yml"));
         assert_eq!(spec.mode, "0644");
         assert_eq!(spec.cleanup, FileCleanup::Keep);
@@ -969,7 +1208,7 @@ resources:
         assert!(matches!(err, Error::InvalidImportSpec(_)));
         assert!(
             err.to_string()
-                .contains("resources must contain at least one entry")
+                .contains("resources or resource_registry must contain at least one entry")
         );
     }
 
@@ -989,10 +1228,45 @@ resources:
             .resources
             .get("BUNDLED_DOCKER_COMPOSE_FILE")
             .unwrap();
-        assert_eq!(spec.src, PathBuf::from("./docker-compose.yml"));
+        assert_eq!(spec.src, Some(PathBuf::from("./docker-compose.yml")));
         assert_eq!(spec.to_file, PathBuf::from("./docker-compose.yml"));
         assert_eq!(spec.mode, "0600");
         assert_eq!(spec.cleanup, FileCleanup::OnExit);
+    }
+
+    #[test]
+    fn resource_import_document_accepts_registry_only_specs() {
+        let document: ResourceImportDocument = serde_yaml::from_str(
+            r#"
+resource_registry:
+  caddy.main_config:
+    type: file
+    description: Main Caddy config
+    path: ./Caddyfile
+"#,
+        )
+        .unwrap();
+
+        assert!(document.resources.is_empty());
+        let entry = document.resource_registry.get("caddy.main_config").unwrap();
+        assert_eq!(entry.kind(), "file");
+        assert_eq!(entry.description(), Some("Main Caddy config"));
+    }
+
+    #[test]
+    fn resource_import_document_preserves_at_sources_for_late_resolution() {
+        let document: ResourceImportDocument = serde_yaml::from_str(
+            r#"
+resources:
+  CADDY_CONFIG_FILE:
+    src: "@caddy.main_config"
+    to-file: ./Caddyfile
+"#,
+        )
+        .unwrap();
+
+        let spec = document.resources.get("CADDY_CONFIG_FILE").unwrap();
+        assert_eq!(spec.src, Some(PathBuf::from("@caddy.main_config")));
     }
 
     #[test]
