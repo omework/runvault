@@ -14,26 +14,64 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    Profile(ProfileCommand),
+    Bundles(BundlesCommand),
     Cmd(CmdCommand),
-    #[command(name = "init", alias = "create-profile")]
+    #[command(hide = true, name = "init", alias = "create-profile")]
     Init(CreateProfileArgs),
+    #[command(hide = true)]
     Bundle(BundleArgs),
-    Cache(CacheCommand),
+    #[command(hide = true)]
     Reset,
-    Encrypt(EncryptArgs),
-    Jwt(JwtArgs),
+    Jwt(JwtCommand),
+    #[command(hide = true)]
     Set(SetArgs),
+    Env(EnvCommand),
+    Assets(AssetsCommand),
     Pki(PkiCommand),
+    #[command(hide = true)]
     Import(ImportCommand),
-    ImportFiles(ImportFilesArgs),
     Resources(ResourcesCommand),
+    #[command(hide = true)]
     Delete(DeleteArgs),
+    #[command(hide = true)]
     Unset(UnsetArgs),
+    #[command(hide = true)]
     UnsetFrom(UnsetFromArgs),
+    #[command(hide = true)]
     Reveal(RevealArgs),
+    #[command(hide = true)]
     Run(ProfileArgs),
+    #[command(hide = true)]
     Rollback(ProfileArgs),
     Ping(PingCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct ProfileCommand {
+    #[command(subcommand)]
+    pub command: ProfileSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProfileSubcommand {
+    #[command(alias = "create")]
+    Init(CreateProfileArgs),
+    Reset,
+    Run(ProfileArgs),
+    Rollback(ProfileArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct BundlesCommand {
+    #[command(subcommand)]
+    pub command: BundlesSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BundlesSubcommand {
+    Export(BundleArgs),
+    Run(ProfileArgs),
 }
 
 #[derive(Debug, Args)]
@@ -60,34 +98,12 @@ pub struct BundleArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct CacheCommand {
-    #[command(subcommand)]
-    pub command: CacheSubcommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum CacheSubcommand {
-    Clear(CacheClearArgs),
-}
-
-#[derive(Debug, Args)]
-pub struct CacheClearArgs {
-    pub profile: Option<PathBuf>,
-}
-
-#[derive(Debug, Args)]
 pub struct CreateProfileArgs {
     pub profile: Option<PathBuf>,
     #[arg(long)]
     pub name: Option<String>,
     #[arg(long = "env-file", default_value = "env.sec")]
     pub env_file: PathBuf,
-}
-
-#[derive(Debug, Args)]
-pub struct EncryptArgs {
-    pub input: PathBuf,
-    pub output: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -139,6 +155,44 @@ pub struct SetArgs {
 pub struct ImportCommand {
     #[command(subcommand)]
     pub command: ImportSubcommand,
+}
+
+#[derive(Debug, Args)]
+pub struct EnvCommand {
+    #[command(subcommand)]
+    pub command: EnvSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EnvSubcommand {
+    Import(ImportEnvArgs),
+    Set(SetArgs),
+    Delete(DeleteArgs),
+    Unset(UnsetArgs),
+    UnsetFrom(UnsetFromArgs),
+    Reveal(RevealArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct JwtCommand {
+    #[command(subcommand)]
+    pub command: JwtSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum JwtSubcommand {
+    Generate(JwtArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AssetsCommand {
+    #[command(subcommand)]
+    pub command: AssetsSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AssetsSubcommand {
+    Import(ImportAssetsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -231,12 +285,6 @@ pub struct ImportResourcesArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct ImportFilesArgs {
-    #[arg(value_name = "PROFILE_OR_INPUT", num_args = 1..)]
-    pub targets: Vec<PathBuf>,
-}
-
-#[derive(Debug, Args)]
 pub struct ResourcesCommand {
     #[command(subcommand)]
     pub command: ResourcesSubcommand,
@@ -244,6 +292,7 @@ pub struct ResourcesCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum ResourcesSubcommand {
+    Import(ImportResourcesArgs),
     List(ResourcesListArgs),
     Add(ResourcesAddCommand),
     Remove(ResourcesRemoveArgs),
@@ -337,13 +386,13 @@ pub struct CmdSetArgs {
 #[derive(Debug, Args)]
 pub struct PingCommand {
     #[command(subcommand)]
-    pub command: Option<PingSubcommand>,
-    pub profile: Option<PathBuf>,
+    pub command: PingSubcommand,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum PingSubcommand {
     Add(PingAddArgs),
+    Check(ProfileArgs),
 }
 
 #[derive(Debug, Args)]
@@ -354,15 +403,6 @@ pub struct PingAddArgs {
     pub timeout_seconds: u64,
     #[arg(long, default_value_t = 500)]
     pub interval_millis: u64,
-}
-
-impl CacheClearArgs {
-    pub fn profile_or_default(&self, global_profile: Option<&PathBuf>) -> PathBuf {
-        global_profile
-            .cloned()
-            .or_else(|| self.profile.clone())
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR))
-    }
 }
 
 impl CreateProfileArgs {
@@ -511,19 +551,6 @@ impl ImportAssetsArgs {
     }
 }
 
-impl ImportFilesArgs {
-    pub fn resolve(&self, global_profile: Option<&PathBuf>) -> (PathBuf, Vec<PathBuf>) {
-        if let Some(profile) = global_profile {
-            return (profile.clone(), self.targets.clone());
-        }
-        match self.targets.as_slice() {
-            [input] => (PathBuf::from(DEFAULT_PROFILE_DIR), vec![input.clone()]),
-            [first, rest @ ..] if looks_like_profile_path(first) => (first.clone(), rest.to_vec()),
-            inputs => (PathBuf::from(DEFAULT_PROFILE_DIR), inputs.to_vec()),
-        }
-    }
-}
-
 impl DeleteArgs {
     pub fn resolve(&self, global_profile: Option<&PathBuf>) -> (PathBuf, String) {
         match self.targets.as_slice() {
@@ -627,15 +654,6 @@ impl CmdSetArgs {
     }
 }
 
-impl PingCommand {
-    pub fn profile_or_default(&self, global_profile: Option<&PathBuf>) -> PathBuf {
-        global_profile
-            .cloned()
-            .or_else(|| self.profile.clone())
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR))
-    }
-}
-
 impl PingAddArgs {
     pub fn resolve(&self, global_profile: Option<&PathBuf>) -> (PathBuf, String, String) {
         match self.targets.as_slice() {
@@ -669,8 +687,9 @@ fn looks_like_profile_path(path: &PathBuf) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, CmdSubcommand, Command, DEFAULT_PROFILE_DIR, ImportSubcommand, PingSubcommand,
-        PkiSubcommand, ResourcesAddSubcommand, ResourcesSubcommand,
+        AssetsSubcommand, BundlesSubcommand, Cli, CmdSubcommand, Command, DEFAULT_PROFILE_DIR,
+        EnvSubcommand, JwtSubcommand, PingSubcommand, PkiSubcommand, ProfileSubcommand,
+        ResourcesAddSubcommand, ResourcesSubcommand,
     };
     use clap::Parser;
     use std::{
@@ -681,13 +700,13 @@ mod tests {
 
     #[test]
     fn import_defaults_to_dot_vault_for_multiple_inputs() {
-        let cli = Cli::try_parse_from(["runvault", "import", "env", ".env", ".env.local"]).unwrap();
+        let cli = Cli::try_parse_from(["runvault", "env", "import", ".env", ".env.local"]).unwrap();
 
-        let Command::Import(args) = cli.command else {
-            panic!("expected import command");
+        let Command::Env(args) = cli.command else {
+            panic!("expected env command");
         };
-        let ImportSubcommand::Env(args) = args.command else {
-            panic!("expected import env subcommand");
+        let EnvSubcommand::Import(args) = args.command else {
+            panic!("expected env import subcommand");
         };
 
         let (profile, inputs) = args.resolve(None);
@@ -700,11 +719,13 @@ mod tests {
 
     #[test]
     fn jwt_defaults_to_dot_vault_for_profile() {
-        let cli = Cli::try_parse_from(["runvault", "jwt", "--audience", "tempo"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["runvault", "jwt", "generate", "--audience", "tempo"]).unwrap();
 
         let Command::Jwt(args) = cli.command else {
             panic!("expected jwt command");
         };
+        let JwtSubcommand::Generate(args) = args.command;
 
         let profile = args.resolve(None);
         assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
@@ -716,6 +737,7 @@ mod tests {
         let cli = Cli::try_parse_from([
             "runvault",
             "jwt",
+            "generate",
             "deployments/ovh/services",
             "--audience",
             "tempo",
@@ -725,6 +747,7 @@ mod tests {
         let Command::Jwt(args) = cli.command else {
             panic!("expected jwt command");
         };
+        let JwtSubcommand::Generate(args) = args.command;
 
         let profile = args.resolve(None);
         assert_eq!(profile, PathBuf::from("deployments/ovh/services"));
@@ -744,7 +767,7 @@ mod tests {
         let Command::Ping(args) = cli.command else {
             panic!("expected ping command");
         };
-        let Some(PingSubcommand::Add(add)) = args.command else {
+        let PingSubcommand::Add(add) = args.command else {
             panic!("expected ping add subcommand");
         };
 
@@ -811,19 +834,19 @@ mod tests {
             "runvault",
             "--profile",
             "deployments/ovh/services",
-            "import",
             "env",
+            "import",
             ".env",
             ".env.local",
         ])
         .unwrap();
 
         let global_profile = cli.profile.as_ref();
-        let Command::Import(args) = cli.command else {
-            panic!("expected import command");
+        let Command::Env(args) = cli.command else {
+            panic!("expected env command");
         };
-        let ImportSubcommand::Env(args) = args.command else {
-            panic!("expected import env subcommand");
+        let EnvSubcommand::Import(args) = args.command else {
+            panic!("expected env import subcommand");
         };
 
         let (profile, inputs) = args.resolve(global_profile);
@@ -840,6 +863,7 @@ mod tests {
             "runvault",
             "--profile",
             "deployments/ovh/services",
+            "env",
             "set",
             "ignored-profile",
             "DATABASE_URL",
@@ -849,8 +873,11 @@ mod tests {
         .unwrap();
 
         let global_profile = cli.profile.as_ref();
-        let Command::Set(args) = cli.command else {
-            panic!("expected set command");
+        let Command::Env(args) = cli.command else {
+            panic!("expected env command");
+        };
+        let EnvSubcommand::Set(args) = args.command else {
+            panic!("expected env set subcommand");
         };
 
         let (profile, key) = args.resolve(global_profile);
@@ -940,19 +967,26 @@ mod tests {
 
     #[test]
     fn reset_parses_without_arguments() {
-        let cli = Cli::try_parse_from(["runvault", "reset"]).unwrap();
+        let cli = Cli::try_parse_from(["runvault", "profile", "reset"]).unwrap();
 
-        let Command::Reset = cli.command else {
-            panic!("expected reset command");
+        let Command::Profile(args) = cli.command else {
+            panic!("expected profile command");
+        };
+        let ProfileSubcommand::Reset = args.command else {
+            panic!("expected profile reset subcommand");
         };
     }
 
     #[test]
     fn unset_defaults_to_dot_vault_for_multiple_keys() {
-        let cli = Cli::try_parse_from(["runvault", "unset", "DATABASE_URL", "REDIS_URL"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["runvault", "env", "unset", "DATABASE_URL", "REDIS_URL"]).unwrap();
 
-        let Command::Unset(args) = cli.command else {
-            panic!("expected unset command");
+        let Command::Env(args) = cli.command else {
+            panic!("expected env command");
+        };
+        let EnvSubcommand::Unset(args) = args.command else {
+            panic!("expected env unset subcommand");
         };
 
         let (profile, keys) = args.resolve(None);
@@ -972,6 +1006,7 @@ mod tests {
 
         let cli = Cli::try_parse_from([
             "runvault",
+            "env",
             "unset",
             profile_dir.to_str().unwrap(),
             "DATABASE_URL",
@@ -979,8 +1014,11 @@ mod tests {
         ])
         .unwrap();
 
-        let Command::Unset(args) = cli.command else {
-            panic!("expected unset command");
+        let Command::Env(args) = cli.command else {
+            panic!("expected env command");
+        };
+        let EnvSubcommand::Unset(args) = args.command else {
+            panic!("expected env unset subcommand");
         };
 
         let (profile, keys) = args.resolve(None);
@@ -990,10 +1028,14 @@ mod tests {
 
     #[test]
     fn unset_from_defaults_to_dot_vault_for_multiple_inputs() {
-        let cli = Cli::try_parse_from(["runvault", "unset-from", ".env", ".env.local"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["runvault", "env", "unset-from", ".env", ".env.local"]).unwrap();
 
-        let Command::UnsetFrom(args) = cli.command else {
-            panic!("expected unset-from command");
+        let Command::Env(args) = cli.command else {
+            panic!("expected env command");
+        };
+        let EnvSubcommand::UnsetFrom(args) = args.command else {
+            panic!("expected env unset-from subcommand");
         };
 
         let (profile, inputs) = args.resolve(None);
@@ -1016,6 +1058,7 @@ mod tests {
 
         let cli = Cli::try_parse_from([
             "runvault",
+            "env",
             "unset-from",
             profile_dir.to_str().unwrap(),
             ".env",
@@ -1023,8 +1066,11 @@ mod tests {
         ])
         .unwrap();
 
-        let Command::UnsetFrom(args) = cli.command else {
-            panic!("expected unset-from command");
+        let Command::Env(args) = cli.command else {
+            panic!("expected env command");
+        };
+        let EnvSubcommand::UnsetFrom(args) = args.command else {
+            panic!("expected env unset-from subcommand");
         };
 
         let (profile, inputs) = args.resolve(None);
@@ -1037,10 +1083,14 @@ mod tests {
 
     #[test]
     fn bundle_export_defaults_to_dot_vault_for_output_path() {
-        let cli = Cli::try_parse_from(["runvault", "bundle", "profile.bundle.yaml"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["runvault", "bundles", "export", "profile.bundle.yaml"]).unwrap();
 
-        let Command::Bundle(args) = cli.command else {
-            panic!("expected bundle command");
+        let Command::Bundles(args) = cli.command else {
+            panic!("expected bundles command");
+        };
+        let BundlesSubcommand::Export(args) = args.command else {
+            panic!("expected bundles export subcommand");
         };
 
         let (profile, output) = args.resolve(None);
@@ -1051,11 +1101,20 @@ mod tests {
 
     #[test]
     fn bundle_export_accepts_force_flag() {
-        let cli =
-            Cli::try_parse_from(["runvault", "bundle", "profile.bundle.yaml", "--force"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "runvault",
+            "bundles",
+            "export",
+            "profile.bundle.yaml",
+            "--force",
+        ])
+        .unwrap();
 
-        let Command::Bundle(args) = cli.command else {
-            panic!("expected bundle command");
+        let Command::Bundles(args) = cli.command else {
+            panic!("expected bundles command");
+        };
+        let BundlesSubcommand::Export(args) = args.command else {
+            panic!("expected bundles export subcommand");
         };
 
         assert!(args.force);
@@ -1073,19 +1132,19 @@ mod tests {
 
         let cli = Cli::try_parse_from([
             "runvault",
-            "import",
             "env",
+            "import",
             profile_dir.to_str().unwrap(),
             ".env",
             ".env.local",
         ])
         .unwrap();
 
-        let Command::Import(args) = cli.command else {
-            panic!("expected import command");
+        let Command::Env(args) = cli.command else {
+            panic!("expected env command");
         };
-        let ImportSubcommand::Env(args) = args.command else {
-            panic!("expected import env subcommand");
+        let EnvSubcommand::Import(args) = args.command else {
+            panic!("expected env import subcommand");
         };
 
         let (profile, inputs) = args.resolve(None);
@@ -1100,19 +1159,17 @@ mod tests {
     fn import_assets_defaults_to_dot_vault_for_multiple_specs() {
         let cli = Cli::try_parse_from([
             "runvault",
-            "import",
             "assets",
+            "import",
             "assets-a.yaml",
             "assets-b.yaml",
         ])
         .unwrap();
 
-        let Command::Import(args) = cli.command else {
-            panic!("expected import command");
+        let Command::Assets(args) = cli.command else {
+            panic!("expected assets command");
         };
-        let ImportSubcommand::Assets(args) = args.command else {
-            panic!("expected import assets subcommand");
-        };
+        let AssetsSubcommand::Import(args) = args.command;
 
         let (profile, inputs) = args.resolve(None);
         assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
@@ -1129,8 +1186,8 @@ mod tests {
     fn import_assets_accepts_direct_single_asset_form() {
         let cli = Cli::try_parse_from([
             "runvault",
-            "import",
             "assets",
+            "import",
             "docker-compose.yml",
             "--to-file",
             "./docker-compose.yml",
@@ -1139,12 +1196,10 @@ mod tests {
         ])
         .unwrap();
 
-        let Command::Import(args) = cli.command else {
-            panic!("expected import command");
+        let Command::Assets(args) = cli.command else {
+            panic!("expected assets command");
         };
-        let ImportSubcommand::Assets(args) = args.command else {
-            panic!("expected import assets subcommand");
-        };
+        let AssetsSubcommand::Import(args) = args.command;
 
         assert!(args.uses_inline_spec());
         let (profile, src) = args.resolve_inline(None).unwrap();
@@ -1160,8 +1215,8 @@ mod tests {
             "runvault",
             "--profile",
             "deployments/home/workers",
-            "import",
             "assets",
+            "import",
             "docker-compose.yml",
             "--to-file",
             "./docker-compose.yml",
@@ -1169,12 +1224,10 @@ mod tests {
         .unwrap();
 
         let global_profile = cli.profile.as_ref();
-        let Command::Import(args) = cli.command else {
-            panic!("expected import command");
+        let Command::Assets(args) = cli.command else {
+            panic!("expected assets command");
         };
-        let ImportSubcommand::Assets(args) = args.command else {
-            panic!("expected import assets subcommand");
-        };
+        let AssetsSubcommand::Import(args) = args.command;
 
         let (profile, src) = args.resolve_inline(global_profile).unwrap();
         assert_eq!(profile, PathBuf::from("deployments/home/workers"));
@@ -1183,33 +1236,16 @@ mod tests {
 
     #[test]
     fn import_resources_parses_resource_files() {
-        let cli = Cli::try_parse_from(["runvault", "import", "resources", "assets.yaml"]).unwrap();
+        let cli = Cli::try_parse_from(["runvault", "resources", "import", "assets.yaml"]).unwrap();
 
-        let Command::Import(args) = cli.command else {
-            panic!("expected import command");
+        let Command::Resources(args) = cli.command else {
+            panic!("expected resources command");
         };
-        let ImportSubcommand::Resources(args) = args.command else {
-            panic!("expected import resources subcommand");
+        let ResourcesSubcommand::Import(args) = args.command else {
+            panic!("expected resources import subcommand");
         };
 
         assert_eq!(args.inputs, vec![PathBuf::from("assets.yaml")]);
-    }
-
-    #[test]
-    fn import_files_defaults_to_dot_vault_for_multiple_specs() {
-        let cli = Cli::try_parse_from(["runvault", "import-files", "files-a.yaml", "files-b.yaml"])
-            .unwrap();
-
-        let Command::ImportFiles(args) = cli.command else {
-            panic!("expected import-files command");
-        };
-
-        let (profile, inputs) = args.resolve(None);
-        assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
-        assert_eq!(
-            inputs,
-            vec![PathBuf::from("files-a.yaml"), PathBuf::from("files-b.yaml")]
-        );
     }
 
     #[test]

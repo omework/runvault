@@ -10,8 +10,9 @@ use std::{
 use crate::{
     bundle::{self, BundleDocument, BundleExportOptions},
     cli::{
-        CacheSubcommand, Cli, CmdSubcommand, Command, ImportSubcommand, PingSubcommand,
-        PkiSubcommand, ResourcesAddSubcommand, ResourcesSubcommand,
+        AssetsSubcommand, BundlesSubcommand, Cli, CmdSubcommand, Command, EnvSubcommand,
+        ImportAssetsArgs, ImportEnvArgs, ImportSubcommand, JwtSubcommand, PingSubcommand,
+        PkiSubcommand, ProfileArgs, ProfileSubcommand, ResourcesAddSubcommand, ResourcesSubcommand,
     },
     crypto::{encrypt_file_payload, maybe_decrypt_file_payload},
     envfile::{apply_prefix, parse_env_bytes, parse_reference_value},
@@ -180,92 +181,43 @@ impl Runvault {
         let Cli { profile, command } = cli;
         let global_profile = profile.as_deref();
         match command {
+            Command::Profile(args) => match args.command {
+                ProfileSubcommand::Init(args) => {
+                    self.run_profile_init_command(profile.as_ref(), args)
+                }
+                ProfileSubcommand::Reset => self.reset_state(),
+                ProfileSubcommand::Run(args) => {
+                    self.run_profile_or_bundle_command(global_profile, profile.as_ref(), args)
+                        .await
+                }
+                ProfileSubcommand::Rollback(args) => {
+                    self.run_rollback_command(profile.as_ref(), args).await
+                }
+            },
+            Command::Bundles(args) => match args.command {
+                BundlesSubcommand::Export(args) => {
+                    self.run_bundle_export_command(profile.as_ref(), args)
+                }
+                BundlesSubcommand::Run(args) => {
+                    self.run_profile_or_bundle_command(global_profile, profile.as_ref(), args)
+                        .await
+                }
+            },
             Command::Cmd(args) => match args.command {
                 CmdSubcommand::Set(set) => {
                     let (profile_input, cmd) = set.resolve(profile.as_ref());
                     self.set_command(Some(profile_input.as_path()), cmd)
                 }
             },
-            Command::Init(args) => {
-                let created = self.init_profile(
-                    Some(args.profile_or_default(profile.as_ref()).as_path()),
-                    &CreateProfileOptions {
-                        name: args.name,
-                        env_file: args.env_file,
-                    },
-                )?;
-                println!("{}", created.display());
-                Ok(())
-            }
-            Command::Bundle(args) => {
-                let (profile_input, output_path) = args.resolve(profile.as_ref());
-                self.export_bundle(
-                    Some(profile_input.as_path()),
-                    &output_path,
-                    &BundleExportOptions {
-                        version: args.version,
-                        description: args.description,
-                        force: args.force,
-                    },
-                )
-            }
-            Command::Cache(args) => match args.command {
-                CacheSubcommand::Clear(_args) => self.clear_cached_passphrase(),
-            },
+            Command::Init(args) => self.run_profile_init_command(profile.as_ref(), args),
+            Command::Bundle(args) => self.run_bundle_export_command(profile.as_ref(), args),
             Command::Reset => self.reset_state(),
-            Command::Encrypt(args) => {
-                let output_path = self.encrypt_file(&args.input, args.output.as_deref())?;
-                println!("{}", output_path.display());
-                Ok(())
-            }
-            Command::Jwt(args) => {
-                let profile_input = args.resolve(profile.as_ref());
-                let token = self.generate_jwt(
-                    Some(profile_input.as_path()),
-                    args.signing_key.as_deref(),
-                    &JwtOptions {
-                        issuer: args.issuer,
-                        audience: Some(args.audience.clone()),
-                        subject: args.subject,
-                        ttl_seconds: parse_ttl_seconds(&args.ttl)?,
-                        claims: args.claims,
-                    },
-                )?;
-                println!("{}", token);
-                Ok(())
-            }
-            Command::Set(args) => {
-                let (profile_input, key) = args.resolve(profile.as_ref());
-                let cleanup = if args.to_file.is_some() {
-                    if args.on_exit {
-                        FileCleanup::OnExit
-                    } else {
-                        FileCleanup::Keep
-                    }
-                } else {
-                    FileCleanup::OnExit
-                };
-                let mode = args
-                    .mode
-                    .as_deref()
-                    .map(profile::parse_file_mode)
-                    .transpose()?
-                    .unwrap_or(0o600);
-                let request = match (args.value, args.from_file, args.to_file) {
-                    (Some(value), None, target_path) => SecretUpdate::plain_text(key, value)
-                        .with_mode(mode)
-                        .with_cleanup(cleanup)
-                        .with_optional_target_path(target_path),
-                    (None, Some(source_path), target_path) => {
-                        SecretUpdate::from_file(key, source_path)
-                            .with_mode(mode)
-                            .with_cleanup(cleanup)
-                            .with_optional_target_path(target_path)
-                    }
-                    _ => unreachable!("clap enforces set arguments"),
-                };
-                self.set_secret(Some(profile_input.as_path()), request)
-            }
+            Command::Jwt(args) => match args.command {
+                JwtSubcommand::Generate(args) => {
+                    self.run_jwt_generate_command(profile.as_ref(), args)
+                }
+            },
+            Command::Set(args) => self.run_env_set_command(profile.as_ref(), args),
             Command::Pki(args) => match args.command {
                 PkiSubcommand::Init(args) => {
                     let created = self.init_pki(&PkiInitOptions {
@@ -299,55 +251,30 @@ impl Runvault {
                 }
                 PkiSubcommand::List(_) => self.list_pki_materials(),
             },
-            Command::Import(args) => match args.command {
-                ImportSubcommand::Env(args) => {
-                    let (profile_input, input_paths) = args.resolve(profile.as_ref());
-                    self.import_env_files(
-                        Some(profile_input.as_path()),
-                        &input_paths,
-                        args.prefix.as_deref(),
-                    )
+            Command::Env(args) => match args.command {
+                EnvSubcommand::Import(args) => self.run_import_env_command(profile.as_ref(), args),
+                EnvSubcommand::Set(args) => self.run_env_set_command(profile.as_ref(), args),
+                EnvSubcommand::Delete(args) => self.run_env_delete_command(profile.as_ref(), args),
+                EnvSubcommand::Unset(args) => self.run_env_unset_command(profile.as_ref(), args),
+                EnvSubcommand::UnsetFrom(args) => {
+                    self.run_env_unset_from_command(profile.as_ref(), args)
                 }
-                ImportSubcommand::Resources(args) => self.import_resources(&args.inputs),
-                ImportSubcommand::Assets(args) => {
-                    if args.uses_inline_spec() {
-                        let (profile_input, src) = args
-                            .resolve_inline(profile.as_ref())
-                            .map_err(Error::InvalidImportSpec)?;
-                        let target_path = args
-                            .to_file
-                            .clone()
-                            .expect("inline asset to-file is required");
-                        let key = args
-                            .key
-                            .clone()
-                            .unwrap_or_else(|| infer_asset_key(&target_path));
-                        self.upsert_asset(
-                            Some(profile_input.as_path()),
-                            &key,
-                            AssetImportSpec {
-                                src: Some(src),
-                                ref_name: None,
-                                to_file: target_path,
-                                mode: args.mode.clone().unwrap_or_else(|| "0600".to_string()),
-                                cleanup: if args.on_exit {
-                                    FileCleanup::OnExit
-                                } else {
-                                    FileCleanup::Keep
-                                },
-                            },
-                        )
-                    } else {
-                        let (profile_input, input_paths) = args.resolve(profile.as_ref());
-                        self.import_asset_specs(Some(profile_input.as_path()), &input_paths)
-                    }
+                EnvSubcommand::Reveal(args) => self.run_env_reveal_command(profile.as_ref(), args),
+            },
+            Command::Assets(args) => match args.command {
+                AssetsSubcommand::Import(args) => {
+                    self.run_import_assets_command(profile.as_ref(), args)
                 }
             },
-            Command::ImportFiles(args) => {
-                let (profile_input, input_paths) = args.resolve(profile.as_ref());
-                self.import_file_specs(Some(profile_input.as_path()), &input_paths)
-            }
+            Command::Import(args) => match args.command {
+                ImportSubcommand::Env(args) => self.run_import_env_command(profile.as_ref(), args),
+                ImportSubcommand::Resources(args) => self.import_resources(&args.inputs),
+                ImportSubcommand::Assets(args) => {
+                    self.run_import_assets_command(profile.as_ref(), args)
+                }
+            },
             Command::Resources(args) => match args.command {
+                ResourcesSubcommand::Import(args) => self.import_resources(&args.inputs),
                 ResourcesSubcommand::List(_) => self.list_resources(),
                 ResourcesSubcommand::Add(args) => match args.command {
                     ResourcesAddSubcommand::File(args) => {
@@ -360,50 +287,17 @@ impl Runvault {
                 ResourcesSubcommand::Remove(args) => self.remove_resources(&args.names),
                 ResourcesSubcommand::RemoveFrom(args) => self.remove_resources_from(&args.inputs),
             },
-            Command::Delete(args) => {
-                let (profile_input, key) = args.resolve(profile.as_ref());
-                self.delete_secret(Some(profile_input.as_path()), &key)
-            }
-            Command::Unset(args) => {
-                let (profile_input, keys) = args.resolve(profile.as_ref());
-                self.delete_secrets(Some(profile_input.as_path()), &keys)
-            }
-            Command::UnsetFrom(args) => {
-                let (profile_input, input_paths) = args.resolve(profile.as_ref());
-                self.unset_from_env_files(Some(profile_input.as_path()), &input_paths)
-            }
-            Command::Reveal(args) => {
-                let (profile_input, key) = args.resolve(profile.as_ref());
-                let value = self.reveal_secret(Some(profile_input.as_path()), &key)?;
-                self.write_revealed_value(&key, &value, args.raw, args.output.as_deref())
-            }
+            Command::Delete(args) => self.run_env_delete_command(profile.as_ref(), args),
+            Command::Unset(args) => self.run_env_unset_command(profile.as_ref(), args),
+            Command::UnsetFrom(args) => self.run_env_unset_from_command(profile.as_ref(), args),
+            Command::Reveal(args) => self.run_env_reveal_command(profile.as_ref(), args),
             Command::Run(args) => {
-                if let Some(target) = args.profile.as_deref() {
-                    if global_profile.is_none() && looks_like_profile_input(target) {
-                        self.run_profile(target).await
-                    } else {
-                        self.run_bundle(target).await
-                    }
-                } else {
-                    let profile_input = args.explicit_profile(profile.as_ref()).ok_or_else(|| {
-                        Error::Registry(
-                            "run without a bundle requires --profile so the bundle track can be resolved".to_string(),
-                        )
-                    })?;
-                    self.run_registered_profile(&profile_input).await
-                }
+                self.run_profile_or_bundle_command(global_profile, profile.as_ref(), args)
+                    .await
             }
-            Command::Rollback(args) => {
-                let profile_input = args.explicit_profile(profile.as_ref()).ok_or_else(|| {
-                    Error::Registry(
-                        "rollback requires --profile so the bundle track can be resolved"
-                            .to_string(),
-                    )
-                })?;
-                self.rollback_profile(&profile_input).await
-            }
+            Command::Rollback(args) => self.run_rollback_command(profile.as_ref(), args).await,
             Command::Ping(args) => match args.command {
-                Some(PingSubcommand::Add(add)) => {
+                PingSubcommand::Add(add) => {
                     let (profile_input, name, url) = add.resolve(profile.as_ref());
                     self.add_ping_target(
                         Some(profile_input.as_path()),
@@ -415,11 +309,224 @@ impl Runvault {
                         },
                     )
                 }
-                None => {
-                    self.ping_profile(&args.profile_or_default(profile.as_ref()))
+                PingSubcommand::Check(check) => {
+                    self.ping_profile(&check.profile_or_default(profile.as_ref()))
                         .await
                 }
             },
+        }
+    }
+
+    fn run_profile_init_command(
+        &self,
+        global_profile: Option<&PathBuf>,
+        args: crate::cli::CreateProfileArgs,
+    ) -> Result<(), Error> {
+        let created = self.init_profile(
+            Some(args.profile_or_default(global_profile).as_path()),
+            &CreateProfileOptions {
+                name: args.name,
+                env_file: args.env_file,
+            },
+        )?;
+        println!("{}", created.display());
+        Ok(())
+    }
+
+    fn run_bundle_export_command(
+        &self,
+        global_profile: Option<&PathBuf>,
+        args: crate::cli::BundleArgs,
+    ) -> Result<(), Error> {
+        let (profile_input, output_path) = args.resolve(global_profile);
+        self.export_bundle(
+            Some(profile_input.as_path()),
+            &output_path,
+            &BundleExportOptions {
+                version: args.version,
+                description: args.description,
+                force: args.force,
+            },
+        )
+    }
+
+    fn run_jwt_generate_command(
+        &self,
+        global_profile: Option<&PathBuf>,
+        args: crate::cli::JwtArgs,
+    ) -> Result<(), Error> {
+        let profile_input = args.resolve(global_profile);
+        let token = self.generate_jwt(
+            Some(profile_input.as_path()),
+            args.signing_key.as_deref(),
+            &JwtOptions {
+                issuer: args.issuer,
+                audience: Some(args.audience.clone()),
+                subject: args.subject,
+                ttl_seconds: parse_ttl_seconds(&args.ttl)?,
+                claims: args.claims,
+            },
+        )?;
+        println!("{}", token);
+        Ok(())
+    }
+
+    fn run_env_set_command(
+        &self,
+        global_profile: Option<&PathBuf>,
+        args: crate::cli::SetArgs,
+    ) -> Result<(), Error> {
+        let (profile_input, key) = args.resolve(global_profile);
+        let cleanup = if args.to_file.is_some() {
+            if args.on_exit {
+                FileCleanup::OnExit
+            } else {
+                FileCleanup::Keep
+            }
+        } else {
+            FileCleanup::OnExit
+        };
+        let mode = args
+            .mode
+            .as_deref()
+            .map(profile::parse_file_mode)
+            .transpose()?
+            .unwrap_or(0o600);
+        let request = match (args.value, args.from_file, args.to_file) {
+            (Some(value), None, target_path) => SecretUpdate::plain_text(key, value)
+                .with_mode(mode)
+                .with_cleanup(cleanup)
+                .with_optional_target_path(target_path),
+            (None, Some(source_path), target_path) => SecretUpdate::from_file(key, source_path)
+                .with_mode(mode)
+                .with_cleanup(cleanup)
+                .with_optional_target_path(target_path),
+            _ => unreachable!("clap enforces set arguments"),
+        };
+        self.set_secret(Some(profile_input.as_path()), request)
+    }
+
+    fn run_env_delete_command(
+        &self,
+        global_profile: Option<&PathBuf>,
+        args: crate::cli::DeleteArgs,
+    ) -> Result<(), Error> {
+        let (profile_input, key) = args.resolve(global_profile);
+        self.delete_secret(Some(profile_input.as_path()), &key)
+    }
+
+    fn run_env_unset_command(
+        &self,
+        global_profile: Option<&PathBuf>,
+        args: crate::cli::UnsetArgs,
+    ) -> Result<(), Error> {
+        let (profile_input, keys) = args.resolve(global_profile);
+        self.delete_secrets(Some(profile_input.as_path()), &keys)
+    }
+
+    fn run_env_unset_from_command(
+        &self,
+        global_profile: Option<&PathBuf>,
+        args: crate::cli::UnsetFromArgs,
+    ) -> Result<(), Error> {
+        let (profile_input, input_paths) = args.resolve(global_profile);
+        self.unset_from_env_files(Some(profile_input.as_path()), &input_paths)
+    }
+
+    fn run_env_reveal_command(
+        &self,
+        global_profile: Option<&PathBuf>,
+        args: crate::cli::RevealArgs,
+    ) -> Result<(), Error> {
+        let (profile_input, key) = args.resolve(global_profile);
+        let value = self.reveal_secret(Some(profile_input.as_path()), &key)?;
+        self.write_revealed_value(&key, &value, args.raw, args.output.as_deref())
+    }
+
+    async fn run_profile_or_bundle_command(
+        &self,
+        global_profile: Option<&Path>,
+        profile: Option<&PathBuf>,
+        args: ProfileArgs,
+    ) -> Result<(), Error> {
+        if let Some(target) = args.profile.as_deref() {
+            if global_profile.is_none() && looks_like_profile_input(target) {
+                self.run_profile(target).await
+            } else {
+                self.run_bundle(target).await
+            }
+        } else {
+            let profile_input = args.explicit_profile(profile).ok_or_else(|| {
+                Error::Registry(
+                    "run without a bundle requires --profile so the bundle track can be resolved"
+                        .to_string(),
+                )
+            })?;
+            self.run_registered_profile(&profile_input).await
+        }
+    }
+
+    async fn run_rollback_command(
+        &self,
+        global_profile: Option<&PathBuf>,
+        args: ProfileArgs,
+    ) -> Result<(), Error> {
+        let profile_input = args.explicit_profile(global_profile).ok_or_else(|| {
+            Error::Registry(
+                "rollback requires --profile so the bundle track can be resolved".to_string(),
+            )
+        })?;
+        self.rollback_profile(&profile_input).await
+    }
+
+    fn run_import_env_command(
+        &self,
+        global_profile: Option<&PathBuf>,
+        args: ImportEnvArgs,
+    ) -> Result<(), Error> {
+        let (profile_input, input_paths) = args.resolve(global_profile);
+        self.import_env_files(
+            Some(profile_input.as_path()),
+            &input_paths,
+            args.prefix.as_deref(),
+        )
+    }
+
+    fn run_import_assets_command(
+        &self,
+        global_profile: Option<&PathBuf>,
+        args: ImportAssetsArgs,
+    ) -> Result<(), Error> {
+        if args.uses_inline_spec() {
+            let (profile_input, src) = args
+                .resolve_inline(global_profile)
+                .map_err(Error::InvalidImportSpec)?;
+            let target_path = args
+                .to_file
+                .clone()
+                .expect("inline asset to-file is required");
+            let key = args
+                .key
+                .clone()
+                .unwrap_or_else(|| infer_asset_key(&target_path));
+            self.upsert_asset(
+                Some(profile_input.as_path()),
+                &key,
+                AssetImportSpec {
+                    src: Some(src),
+                    ref_name: None,
+                    to_file: target_path,
+                    mode: args.mode.clone().unwrap_or_else(|| "0600".to_string()),
+                    cleanup: if args.on_exit {
+                        FileCleanup::OnExit
+                    } else {
+                        FileCleanup::Keep
+                    },
+                },
+            )
+        } else {
+            let (profile_input, input_paths) = args.resolve(global_profile);
+            self.import_asset_specs(Some(profile_input.as_path()), &input_paths)
         }
     }
 

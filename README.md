@@ -63,8 +63,8 @@ If you omit the profile path, `runvault` now defaults to:
 You can also target a profile explicitly with the global `--profile` / `-p` flag:
 
 ```bash
-runvault --profile deployments/ovh/services run
-runvault -p deployments/ovh/services import env .env.local
+runvault --profile deployments/ovh/services profile run
+runvault -p deployments/ovh/services env import .env.local
 runvault -p deployments/ovh/services cmd set -- docker compose up -d
 ```
 
@@ -73,23 +73,20 @@ The flag takes precedence over legacy positional profile arguments.
 ## Commands
 
 ```bash
-runvault init
-runvault init deployments/ovh/services
-runvault --profile deployments/ovh/services run
-runvault reset
-runvault bundle services.bundle.yaml --version v1.0.0 --description "OVH services profile"
-runvault run services.bundle.yaml
-runvault --profile deployments/ovh/services rollback
-runvault encrypt .env
-runvault jwt --issuer runvault --audience tempo --subject worker --ttl 15m
-runvault set DATABASE_URL --value postgres://...
-runvault set deployments/ovh/services DATABASE_URL --value postgres://...
-runvault --profile deployments/ovh/services set DATABASE_URL --value postgres://...
-runvault import env .env.example .env.local --prefix PROD_
-runvault import env deployments/ovh/services .env.example .env.local --prefix PROD_
-runvault --profile deployments/ovh/services import env .env.example .env.local --prefix PROD_
-runvault import-files files-spec.yaml tls-files.yaml
-runvault import-files deployments/ovh/services files-spec.yaml tls-files.yaml
+runvault profile init
+runvault profile init deployments/ovh/services
+runvault --profile deployments/ovh/services profile run
+runvault profile reset
+runvault bundles export services.bundle.yaml --version v1.0.0 --description "OVH services profile"
+runvault bundles run services.bundle.yaml
+runvault --profile deployments/ovh/services profile rollback
+runvault jwt generate --issuer runvault --audience tempo --subject worker --ttl 15m
+runvault env set DATABASE_URL --value postgres://...
+runvault env set deployments/ovh/services DATABASE_URL --value postgres://...
+runvault --profile deployments/ovh/services env set DATABASE_URL --value postgres://...
+runvault env import .env.example .env.local --prefix PROD_
+runvault env import deployments/ovh/services .env.example .env.local --prefix PROD_
+runvault --profile deployments/ovh/services env import .env.example .env.local --prefix PROD_
 runvault cmd set -- docker compose up -d
 runvault --profile deployments/ovh/services cmd set -- docker compose up -d
 runvault ping add api http://127.0.0.1:8080/health
@@ -100,31 +97,30 @@ runvault pki issue --name glt.market --dns glt.market --server --force
 runvault pki issue --name mazie-client --client
 runvault pki list
 runvault pki rotate
-runvault set deployments/ovh/services TLS_KEY \
+runvault env set deployments/ovh/services TLS_KEY \
   --value \"secret-key\" \
   --to-file .runvault/tls/key.pem \
   --mode 0600
-runvault set deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS \
+runvault env set deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS \
   --from-file ./gcp-service-account.json \
   --to-file .runvault/gcp-service-account.json \
   --mode 0600
-runvault delete GOOGLE_APPLICATION_CREDENTIALS
-runvault unset DATABASE_URL REDIS_URL
-runvault unset deployments/ovh/services DATABASE_URL REDIS_URL
-runvault unset-from .env .env.local
-runvault unset-from deployments/ovh/services .env .env.local
-runvault reveal DATABASE_URL
-runvault reveal GOOGLE_APPLICATION_CREDENTIALS --raw
-runvault run
-runvault ping
-runvault cache clear deployments/ovh/services
+runvault env delete GOOGLE_APPLICATION_CREDENTIALS
+runvault env unset DATABASE_URL REDIS_URL
+runvault env unset deployments/ovh/services DATABASE_URL REDIS_URL
+runvault env unset-from .env .env.local
+runvault env unset-from deployments/ovh/services .env .env.local
+runvault env reveal DATABASE_URL
+runvault env reveal GOOGLE_APPLICATION_CREDENTIALS --raw
+runvault profile run
+runvault ping check
 ```
 
 `init` bootstraps the profile folder by creating:
 
 - `runvault.yaml`
 
-It does not create `env.sec`; that file is created lazily by the first `set` or `import`.
+It does not create `env.sec`; that file is created lazily by the first `env set` or `env import`.
 
 `env.sec` now uses a two-layer key model:
 
@@ -166,18 +162,10 @@ So the rule is:
 - system secure store available -> reuse the global passphrase through that store
 - no secure store -> prompt
 
-You can clear the stored global passphrase with:
-
-```bash
-runvault cache clear deployments/ovh/services
-```
-
-On macOS this removes the matching Keychain-backed runvault entry for that profile.
-
 To wipe local Runvault machine state and recreate an empty `~/.runvault` directory:
 
 ```bash
-runvault reset
+runvault profile reset
 ```
 
 This clears the filesystem content under `~/.runvault` and removes the global cached passphrase entry used by Runvault.
@@ -223,14 +211,14 @@ Inside `runvault.yaml`, `assets:` uses profile field names:
 Bootstrap a new profile folder with:
 
 ```bash
-runvault init
-runvault init deployments/ovh/services
+runvault profile init
+runvault profile init deployments/ovh/services
 ```
 
 You can override the generated profile name and encrypted env filename:
 
 ```bash
-runvault init deployments/ovh/services \
+runvault profile init deployments/ovh/services \
   --name ovh-services \
   --env-file env.sec
 ```
@@ -242,7 +230,7 @@ run:
   cmd: ["echo", "configure run.cmd in runvault.yaml"]
 ```
 
-Edit that before you rely on `runvault run`.
+Edit that before you rely on `runvault profile run`.
 
 You can also set the run command from the CLI:
 
@@ -280,28 +268,28 @@ You can package a profile into a single file that contains:
 Export a bundle with:
 
 ```bash
-runvault bundle services.bundle.yaml
-runvault bundle deployments/ovh/services/vault services.bundle.yaml \
+runvault bundles export services.bundle.yaml
+runvault bundles export deployments/ovh/services/vault services.bundle.yaml \
   --version v1.0.0 \
   --description "OVH services deployment"
-runvault bundle deployments/ovh/services/vault services.bundle.yaml --force
+runvault bundles export deployments/ovh/services/vault services.bundle.yaml --force
 ```
 
 Run it later with:
 
 ```bash
-runvault run services.bundle.yaml
-runvault --profile deployments/ovh/services run
-runvault --profile deployments/ovh/services rollback
+runvault bundles run services.bundle.yaml
+runvault --profile deployments/ovh/services profile run
+runvault --profile deployments/ovh/services profile rollback
 ```
 
 Behavior:
 
-- `bundle` defaults to `./.vault` if no profile is specified
+- `bundles export` defaults to `./.vault` if no profile is specified
 - existing bundle targets are rejected by default; use `--force` to overwrite them
-- `run <bundle-file>` requires a bundle `version`, copies the bundle into `~/.runvault/bundles/<profile.name>/<version>/bundle.yaml`, materializes the bundled profile there, and runs from that stored directory
-- `run --profile <path>` with no bundle reruns the current successful bundle registered for that profile's `name`
-- `rollback --profile <path>` reruns the previous successful registered bundle for that profile's `name`
+- `bundles run <bundle-file>` requires a bundle `version`, copies the bundle into `~/.runvault/bundles/<profile.name>/<version>/bundle.yaml`, materializes the bundled profile there, and runs from that stored directory
+- `profile run --profile <path>` with no bundle reruns the current successful bundle registered for that profile's `name`
+- `profile rollback --profile <path>` reruns the previous successful registered bundle for that profile's `name`
 - registry history is stored in `~/.runvault/registry.yaml` and version order follows deployment history, not semantic version sorting
 - password reuse for registered bundle execution uses the same global passphrase cache as normal profile operations
 - profile `assets:` are copied into the bundle and restored before execution
@@ -352,7 +340,7 @@ At runtime, `runvault` reads the file spec from `runvault.yaml`, decrypts the ma
 Example:
 
 ```bash
-runvault set deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS \
+runvault env set deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS \
   --from-file ./gcp-service-account.json \
   --to-file .runvault/gcp-service-account.json \
   --mode 0600
@@ -367,7 +355,7 @@ If you want an ephemeral runtime file instead, use `--on-exit`. That writes `cle
 
 ## Set semantics
 
-`set` now separates:
+`env set` now separates:
 
 - input source
   - `--value`
@@ -380,28 +368,28 @@ Examples:
 
 ```bash
 # value -> env
-runvault set API_KEY --value abc
+runvault env set API_KEY --value abc
 
 # explicit profile
-runvault set deployments/ovh/services API_KEY --value abc
+runvault env set deployments/ovh/services API_KEY --value abc
 
 # file -> env (source file must be valid UTF-8)
-runvault set deployments/ovh/services TLS_CERT_PEM --from-file ./cert.pem
+runvault env set deployments/ovh/services TLS_CERT_PEM --from-file ./cert.pem
 
 # value -> file
-runvault set deployments/ovh/services TLS_KEY \
+runvault env set deployments/ovh/services TLS_KEY \
   --value \"secret-key\" \
   --to-file .runvault/tls/key.pem \
   --mode 0600
 
 # file -> file
-runvault set deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS \
+runvault env set deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS \
   --from-file ./gcp-service-account.json \
   --to-file .runvault/gcp-service-account.json \
   --mode 0600
 
 # file -> file, cleaned up after the child exits
-runvault set deployments/ovh/services TEMP_COMPOSE_FILE \
+runvault env set deployments/ovh/services TEMP_COMPOSE_FILE \
   --from-file ./docker-compose.override.yml \
   --to-file .runvault/docker-compose.override.yml \
   --on-exit
@@ -420,14 +408,14 @@ Defaults:
 - cleanup defaults to `keep` when `--to-file` is used
 - `--on-exit` changes cleanup to `on_exit`
 
-`set ... --to-file ...` also updates `runvault.yaml` so the file spec is visible without decrypting the vault.
+`env set ... --to-file ...` also updates `runvault.yaml` so the file spec is visible without decrypting the vault.
 
 ## Generating a JWT
 
 You can mint an HS256 JWT and print it directly:
 
 ```bash
-runvault jwt \
+runvault jwt generate \
   --issuer runvault \
   --audience tempo \
   --subject workers-otel \
@@ -437,7 +425,7 @@ runvault jwt \
 Explicit profile also works:
 
 ```bash
-runvault jwt deployments/ovh/services/vault --audience tempo
+runvault jwt generate deployments/ovh/services/vault --audience tempo
 ```
 
 Behavior:
@@ -463,20 +451,20 @@ Behavior:
 You can bulk-load an existing dotenv-style file into the encrypted vault:
 
 ```bash
-runvault import env deployments/ovh/services .env.example
+runvault env import deployments/ovh/services .env.example
 ```
 
 You can also import multiple dotenv files in one call. Shell wildcards work naturally because the shell expands them before `runvault` sees the arguments:
 
 ```bash
-runvault import env deployments/ovh/services .env .env.local
-runvault import env deployments/ovh/services .env.*
+runvault env import deployments/ovh/services .env .env.local
+runvault env import deployments/ovh/services .env.*
 ```
 
 You can also add a prefix to every imported key before it is stored:
 
 ```bash
-runvault import env deployments/ovh/services .env.example .env.local --prefix PROD_
+runvault env import deployments/ovh/services .env.example .env.local --prefix PROD_
 ```
 
 Behavior:
@@ -485,7 +473,7 @@ Behavior:
 - multiple input files are imported from left to right
 - later files overwrite earlier keys when they define the same final key
 - imported keys overwrite existing plain-text values with the same final key
-- `import env` also understands inline file-spec references in env values
+- `env import` also understands inline file-spec references in env values
 - the prefix is applied before key validation
 
 Inline reference format:
@@ -500,18 +488,18 @@ Recommended notation:
 - `@.env-files.yaml`
 - use `@"path with spaces.yaml"` only when quoting is needed
 
-When `import env` sees one of these values, it:
+When `env import` sees one of these values, it:
 
 - loads the referenced YAML file
 - looks up the same env key inside its `files:` map
-- imports that entry using the same semantics as `runvault import-files`
+- imports that entry as a file-backed env value
 
 ## Importing assets from a YAML spec
 
 You can bulk-load profile assets from a YAML file:
 
 ```bash
-runvault import assets deployments/ovh/services assets.yaml
+runvault assets import deployments/ovh/services assets.yaml
 ```
 
 Spec format:
@@ -550,7 +538,7 @@ Behavior:
 You can also import a single asset directly without a YAML spec:
 
 ```bash
-runvault -p deployments/home/workers import assets docker-compose.yml \
+runvault -p deployments/home/workers assets import docker-compose.yml \
   --to-file ./docker-compose.yml \
   --mode 0644
 ```
@@ -572,68 +560,15 @@ assets:
     to-file: ./docker-compose.yml
 ```
 
-## Importing file-backed values from a YAML spec
-
-You can bulk-load file-backed values from a YAML file:
-
-```bash
-runvault import-files deployments/ovh/services files-spec.yaml
-```
-
-You can also import multiple spec files:
-
-```bash
-runvault import-files deployments/ovh/services files-spec.yaml certs/*.yaml
-```
-
-Spec format:
-
-```yaml
-files:
-  SERVICE_CA_CRT:
-    src: pki://ca/crt.pem
-    to-file: /home/debian/mata35/pki/root.crt.pem
-    mode: "0644"
-    cleanup: keep
-  SERVICE_KEY:
-    src: pki://glt.market/key.pem
-    to-file: /home/debian/mata35/pki/glt.market.key.pem
-    mode: "0600"
-    cleanup: keep
-  FIREBASE_JSON:
-    src: ../firebase/service-account.json
-```
-
-File import specs can reuse global resource registry entries:
-
-```yaml
-files:
-  APP_ID:
-    src: "@app.namespace"
-  SERVICE_CA_CRT:
-    src: "@service.ca"
-    to-file: /home/debian/mata35/pki/root.crt.pem
-    mode: "0644"
-    cleanup: keep
-```
-
-For `runvault import-files`, `file` refs behave like `src`; `text` refs behave
-like inline values and are stored encrypted in `env.sec`. Registry `value`
-fields are visible in the global resources registry, so use `text` entries only
-for values that are acceptable to keep outside `env.sec`.
-
-Quote `@...` values in YAML, because unquoted `@` is reserved by YAML parsers.
-The older `ref: name` notation is still accepted for compatibility.
-
 ## Managing global resources
 
 Resources are global references stored under `~/.runvault/resources.yaml`.
-They are managed only through `runvault resources ...` or `runvault import resources ...`.
+They are managed only through `runvault resources ...`.
 
 Import resources from one or more YAML files:
 
 ```bash
-runvault import resources resources.yaml
+runvault resources import resources.yaml
 ```
 
 Resource spec format:
@@ -680,7 +615,7 @@ Behavior:
 - with `to-file`, encrypted file content is stored in `env.sec` and the visible file spec is mirrored into `runvault.yaml`
 - without `to-file`, the source file content is imported as a plain env value
 - when importing as a plain env value, the source file must be valid UTF-8
-- `runvault import` can reference this same spec file inline from a dotenv value using `@path`
+- `runvault env import` can reference this same spec file inline from a dotenv value using `@path`
 - relative `src` paths are resolved relative to the YAML spec file location
 - imported file-backed keys overwrite existing values with the same key
 - `mode` and `cleanup` are only valid when `to-file` is present
@@ -692,7 +627,7 @@ Behavior:
 You can inspect a stored key with:
 
 ```bash
-runvault reveal deployments/ovh/services DATABASE_URL
+runvault env reveal deployments/ovh/services DATABASE_URL
 ```
 
 Behavior:
@@ -708,13 +643,13 @@ Behavior:
 To print file-backed content directly:
 
 ```bash
-runvault reveal deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS --raw
+runvault env reveal deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS --raw
 ```
 
 To write any revealed value to a file:
 
 ```bash
-runvault reveal deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS --output /tmp/gcp.json
+runvault env reveal deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS --output /tmp/gcp.json
 ```
 
 ## Notes
@@ -722,7 +657,7 @@ runvault reveal deployments/ovh/services GOOGLE_APPLICATION_CREDENTIALS --output
 - the profile stays plaintext
 - the env payload is expected to be age passphrase-encrypted
 - the default encrypted payload file name is `env.sec`
-- plaintext env files are only used as `encrypt` input
+- plaintext env files are only used as `env import` input
 - `runvault` never writes decrypted plain text values back to disk
 - file-backed values persist by default when `--to-file` is used
 - use `--on-exit` or `cleanup: on_exit` for ephemeral runtime files
