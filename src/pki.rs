@@ -31,6 +31,9 @@ const PKI_INFRA_FILE_NAME: &str = "infra.yaml";
 pub const DEFAULT_ROOT_CA_DAYS: u32 = 3650;
 const PKI_URI_SCHEME: &str = "pki://";
 const PKI_CA_NAME: &str = "ca";
+const PKI_KEY_FILE_NAME: &str = "key.pem";
+const PKI_CERT_FILE_NAME: &str = "crt.pem";
+const PKI_CHAIN_FILE_NAME: &str = "chain.pem";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PkiMaterialFile {
@@ -235,9 +238,9 @@ fn init_infra_pki_at(
 ) -> Result<PathBuf, Error> {
     let pki_dir = root_dir.to_path_buf();
     let infra_path = pki_dir.join(PKI_INFRA_FILE_NAME);
-    let root_key_rel = PathBuf::from("ca").join("key.pem");
-    let root_cert_rel = PathBuf::from("ca").join("crt.pem");
-    let root_chain_rel = PathBuf::from("ca").join("chain.pem");
+    let root_key_rel = ca_material_rel_path(PkiMaterialFile::Key);
+    let root_cert_rel = ca_material_rel_path(PkiMaterialFile::Cert);
+    let root_chain_rel = ca_material_rel_path(PkiMaterialFile::Chain);
     let root_key_path = pki_dir.join(&root_key_rel);
     let root_cert_path = pki_dir.join(&root_cert_rel);
     let root_chain_path = pki_dir.join(&root_chain_rel);
@@ -351,9 +354,7 @@ fn issue_infra_certificate_at(
         return Err(Error::AlreadyExists(pki_dir.join("issued").join(name)));
     }
 
-    let root_key =
-        load_private_key_with_password(&pki_dir.join(&infra.root.key_path), password.clone())?;
-    let root_cert = load_certificate(&pki_dir.join(&infra.root.cert_path))?;
+    let (root_key, root_cert) = load_root_ca_materials(&pki_dir, password.clone())?;
 
     let mut dns_names = options.dns_names.clone();
     let mut client = options.client;
@@ -434,9 +435,7 @@ fn rotate_infra_certificates_at(root_dir: &Path, password: SecretString) -> Resu
     let infra_path = pki_dir.join(PKI_INFRA_FILE_NAME);
     let infra = load_infra_document(&infra_path)?;
 
-    let root_key =
-        load_private_key_with_password(&pki_dir.join(&infra.root.key_path), password.clone())?;
-    let root_cert = load_certificate(&pki_dir.join(&infra.root.cert_path))?;
+    let (root_key, root_cert) = load_root_ca_materials(&pki_dir, password.clone())?;
 
     for issued in &infra.issued {
         let key_path = pki_dir.join(&issued.key_path);
@@ -792,11 +791,31 @@ fn validate_leaf_name(name: &str) -> Result<(), Error> {
 impl PkiMaterialFile {
     fn file_name(self) -> &'static str {
         match self {
-            Self::Key => "key.pem",
-            Self::Cert => "crt.pem",
-            Self::Chain => "chain.pem",
+            Self::Key => PKI_KEY_FILE_NAME,
+            Self::Cert => PKI_CERT_FILE_NAME,
+            Self::Chain => PKI_CHAIN_FILE_NAME,
         }
     }
+}
+
+fn ca_material_rel_path(file: PkiMaterialFile) -> PathBuf {
+    PathBuf::from(PKI_CA_NAME).join(file.file_name())
+}
+
+fn ca_material_path(root_dir: &Path, file: PkiMaterialFile) -> PathBuf {
+    root_dir.join(ca_material_rel_path(file))
+}
+
+fn load_root_ca_materials(
+    root_dir: &Path,
+    password: SecretString,
+) -> Result<(PKey<Private>, X509), Error> {
+    let root_key = load_private_key_with_password(
+        &ca_material_path(root_dir, PkiMaterialFile::Key),
+        password,
+    )?;
+    let root_cert = load_certificate(&ca_material_path(root_dir, PkiMaterialFile::Cert))?;
+    Ok((root_key, root_cert))
 }
 
 fn parse_pki_material_file(value: &str, raw_uri: &str) -> Result<PkiMaterialFile, Error> {
@@ -820,7 +839,7 @@ mod tests {
     use super::{
         DEFAULT_ROOT_CA_DAYS, PkiInitOptions, PkiIssueOptions, init_infra_pki_at,
         issue_infra_certificate_at, list_infra_materials_at, load_infra_document, resolve_pki_uri,
-        rotate_infra_certificates_at, validate_leaf_name,
+        rotate_infra_certificates_at, save_infra_document, validate_leaf_name,
     };
     use crate::error::Error;
     use age::secrecy::SecretString;
@@ -890,6 +909,48 @@ mod tests {
         let infra = load_infra_document(&dir.path().join("infra.yaml")).unwrap();
         assert_eq!(infra.issued.len(), 1);
         assert_eq!(infra.issued[0].name, "api.service.local");
+        assert!(issued_dir.join("key.pem").exists());
+        assert!(issued_dir.join("crt.pem").exists());
+        assert!(issued_dir.join("chain.pem").exists());
+    }
+
+    #[test]
+    fn issue_uses_canonical_ca_material_paths_even_when_infra_has_legacy_root_paths() {
+        let dir = tempdir().unwrap();
+        let password = SecretString::from("secret".to_string());
+        init_infra_pki_at(
+            dir.path(),
+            password.clone(),
+            &PkiInitOptions {
+                common_name: Some("Infra Root".to_string()),
+                days: 3650,
+                force: false,
+            },
+        )
+        .unwrap();
+
+        let mut infra = load_infra_document(&dir.path().join("infra.yaml")).unwrap();
+        infra.root.key_path = PathBuf::from("ca/root/key.pem");
+        infra.root.cert_path = PathBuf::from("ca/root/crt.pem");
+        infra.root.chain_path = PathBuf::from("ca/root/chain.pem");
+        save_infra_document(&dir.path().join("infra.yaml"), &infra).unwrap();
+
+        let issued_dir = issue_infra_certificate_at(
+            dir.path(),
+            password,
+            "api.service.local",
+            &PkiIssueOptions {
+                common_name: None,
+                dns_names: vec!["api.service.local".to_string()],
+                ip_addrs: vec![],
+                client: false,
+                server: true,
+                days: 825,
+                force: false,
+            },
+        )
+        .unwrap();
+
         assert!(issued_dir.join("key.pem").exists());
         assert!(issued_dir.join("crt.pem").exists());
         assert!(issued_dir.join("chain.pem").exists());
