@@ -15,7 +15,7 @@ pub mod secure_store;
 pub mod vault;
 
 pub use app::{
-    BundleListing, BundleVersionListing, ResourceListing, RevealedFile, RevealedValue, Runvault,
-    SecretSource, SecretUpdate,
+    BundleListing, BundleVersionListing, ResourceInfo, ResourceListing, RevealedFile,
+    RevealedValue, Runvault, SecretSource, SecretUpdate,
 };
 pub use pki::PkiMaterialListing;

@@ -306,6 +306,7 @@ pub struct ResourcesCommand {
 pub enum ResourcesSubcommand {
     Import(ImportResourcesArgs),
     List(ResourcesListArgs),
+    Info(ResourcesInfoArgs),
     Add(ResourcesAddCommand),
     Remove(ResourcesRemoveArgs),
     RemoveFrom(ResourcesRemoveFromArgs),
@@ -313,6 +314,11 @@ pub enum ResourcesSubcommand {
 
 #[derive(Debug, Args)]
 pub struct ResourcesListArgs {}
+
+#[derive(Debug, Args)]
+pub struct ResourcesInfoArgs {
+    pub id: String,
+}
 
 #[derive(Debug, Args)]
 pub struct ResourcesAddCommand {
@@ -1394,6 +1400,21 @@ mod tests {
         let ResourcesSubcommand::List(_args) = args.command else {
             panic!("expected resources list subcommand");
         };
+    }
+
+    #[test]
+    fn resources_info_parses_id() {
+        let cli =
+            Cli::try_parse_from(["runvault", "resources", "info", "caddy.main_config"]).unwrap();
+
+        let Command::Resources(args) = cli.command else {
+            panic!("expected resources command");
+        };
+        let ResourcesSubcommand::Info(args) = args.command else {
+            panic!("expected resources info subcommand");
+        };
+
+        assert_eq!(args.id, "caddy.main_config");
     }
 
     #[test]

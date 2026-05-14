@@ -617,9 +617,10 @@ List registered resources:
 
 ```bash
 runvault resources list
+runvault resources info caddy.main_config
 ```
 
-Output includes the resource name, type, and description.
+`resources list` includes the resource name, type, and description. `resources info <id>` prints a single resource with its type, description, and path or value.
 
 Behavior:
 

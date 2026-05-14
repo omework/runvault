@@ -84,6 +84,15 @@ pub struct ResourceListing {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceInfo {
+    pub name: String,
+    pub kind: String,
+    pub description: Option<String>,
+    pub path: Option<PathBuf>,
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BundleListing {
     pub name: String,
     pub current_version: Option<String>,
@@ -295,6 +304,7 @@ impl Runvault {
             Command::Resources(args) => match args.command {
                 ResourcesSubcommand::Import(args) => self.import_resources(&args.inputs),
                 ResourcesSubcommand::List(_) => self.list_resources(),
+                ResourcesSubcommand::Info(args) => self.print_resource_info(&args.id),
                 ResourcesSubcommand::Add(args) => match args.command {
                     ResourcesAddSubcommand::File(args) => {
                         self.add_file_resource(&args.name, args.path, args.description)
@@ -1013,6 +1023,30 @@ impl Runvault {
             .collect())
     }
 
+    pub fn resource_info(&self, id: &str) -> Result<ResourceInfo, Error> {
+        let resources = load_global_resources()?;
+        let entry = resources
+            .get(id)
+            .ok_or_else(|| Error::InvalidImportSpec(format!("resource '{}' does not exist", id)))?;
+        Ok(resource_info_from_entry(id, entry))
+    }
+
+    pub fn print_resource_info(&self, id: &str) -> Result<(), Error> {
+        let info = self.resource_info(id)?;
+        println!("name: {}", info.name);
+        println!("type: {}", info.kind);
+        if let Some(description) = info.description {
+            println!("description: {}", description);
+        }
+        if let Some(path) = info.path {
+            println!("path: {}", path.display());
+        }
+        if let Some(value) = info.value {
+            println!("value: {}", value);
+        }
+        Ok(())
+    }
+
     pub fn delete_secret(&self, profile_input: Option<&Path>, key: &str) -> Result<(), Error> {
         self.delete_secrets(profile_input, &[key.to_string()])
     }
@@ -1589,6 +1623,25 @@ fn save_global_resources(resources: &BTreeMap<String, ResourceRegistryEntry>) ->
     std::fs::write(&path, yaml).map_err(|source| Error::WriteFile { path, source })
 }
 
+fn resource_info_from_entry(name: &str, entry: &ResourceRegistryEntry) -> ResourceInfo {
+    match entry {
+        ResourceRegistryEntry::File { description, path } => ResourceInfo {
+            name: name.to_string(),
+            kind: entry.kind().to_string(),
+            description: description.clone(),
+            path: Some(path.clone()),
+            value: None,
+        },
+        ResourceRegistryEntry::Text { description, value } => ResourceInfo {
+            name: name.to_string(),
+            kind: entry.kind().to_string(),
+            description: description.clone(),
+            path: None,
+            value: Some(value.clone()),
+        },
+    }
+}
+
 fn apply_file_import_spec(
     profile: &mut Profile,
     vault: &mut VaultDocument,
@@ -2098,6 +2151,39 @@ assets:
             resources[0].description.as_deref(),
             Some("Shared app namespace")
         );
+
+        unsafe {
+            match previous_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn resource_info_returns_full_resource_details() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let previous_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", dir.path());
+        }
+
+        let runvault = Runvault::default();
+        runvault
+            .add_file_resource(
+                "caddy.main_config",
+                PathBuf::from("./Caddyfile"),
+                Some("Main Caddy config".to_string()),
+            )
+            .unwrap();
+
+        let info = runvault.resource_info("caddy.main_config").unwrap();
+        assert_eq!(info.name, "caddy.main_config");
+        assert_eq!(info.kind, "file");
+        assert_eq!(info.description.as_deref(), Some("Main Caddy config"));
+        assert_eq!(info.path.as_deref(), Some(Path::new("./Caddyfile")));
+        assert_eq!(info.value, None);
 
         unsafe {
             match previous_home {
