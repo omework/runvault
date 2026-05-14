@@ -116,6 +116,8 @@ runvault env reveal GOOGLE_APPLICATION_CREDENTIALS --raw
 runvault ping check
 ```
 
+For guidance on choosing stable global resource IDs, see [Resource ID Naming](docs/resource-id-naming.md).
+
 `init` bootstraps the profile folder by creating:
 
 - `runvault.yaml`
