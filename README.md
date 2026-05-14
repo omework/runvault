@@ -79,6 +79,8 @@ runvault bundle services.bundle.yaml --name ovh-services --version v1.0.0 --desc
 runvault run services.bundle.yaml
 runvault run --name ovh-services
 runvault rollback --name ovh-services
+runvault bundles list
+runvault bundles versions --name ovh-services
 runvault jwt generate --issuer runvault --audience tempo --subject worker --ttl 15m
 runvault env set DATABASE_URL --value postgres://...
 runvault env set deployments/ovh/services DATABASE_URL --value postgres://...
@@ -283,6 +285,8 @@ Run it later with:
 runvault run services.bundle.yaml
 runvault run --name ovh-services
 runvault rollback --name ovh-services
+runvault bundles list
+runvault bundles versions --name ovh-services
 ```
 
 Behavior:
@@ -292,6 +296,8 @@ Behavior:
 - `run <bundle-file>` is the shortcut for `bundles run <bundle-file>`; it requires bundle `name` and `version`, copies the bundle into `~/.runvault/bundles/<name>/<version>/bundle.yaml`, materializes the bundled profile there, and runs from that stored directory
 - `run --name <name>` reruns the current successful bundle registered for that bundle name
 - `rollback --name <name>` reruns the previous successful registered bundle for that bundle name
+- `bundles list` prints registered bundle names with their current version and version count
+- `bundles versions --name <name>` prints registered versions for a bundle name, including status, current marker, and stored bundle path
 - profile paths are packaging inputs; runtime registry identity comes from the exported bundle `--name`
 - registry history is stored in `~/.runvault/registry.yaml` and version order follows deployment history, not semantic version sorting
 - password reuse for registered bundle execution uses the same global passphrase cache as normal profile operations

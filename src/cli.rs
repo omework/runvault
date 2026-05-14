@@ -71,6 +71,17 @@ pub struct BundlesCommand {
 pub enum BundlesSubcommand {
     Export(BundleArgs),
     Run(ProfileArgs),
+    List(BundlesListArgs),
+    Versions(BundleVersionsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct BundlesListArgs {}
+
+#[derive(Debug, Args)]
+pub struct BundleVersionsArgs {
+    #[arg(long = "name")]
+    pub name: String,
 }
 
 #[derive(Debug, Args)]
@@ -1154,6 +1165,33 @@ mod tests {
 
         assert_eq!(args.profile, Some(PathBuf::from("profile.bundle.yaml")));
         assert_eq!(args.name, None);
+    }
+
+    #[test]
+    fn bundles_list_parses_without_arguments() {
+        let cli = Cli::try_parse_from(["runvault", "bundles", "list"]).unwrap();
+
+        let Command::Bundles(args) = cli.command else {
+            panic!("expected bundles command");
+        };
+        let BundlesSubcommand::List(_args) = args.command else {
+            panic!("expected bundles list subcommand");
+        };
+    }
+
+    #[test]
+    fn bundles_versions_parses_bundle_name() {
+        let cli =
+            Cli::try_parse_from(["runvault", "bundles", "versions", "--name", "workers"]).unwrap();
+
+        let Command::Bundles(args) = cli.command else {
+            panic!("expected bundles command");
+        };
+        let BundlesSubcommand::Versions(args) = args.command else {
+            panic!("expected bundles versions subcommand");
+        };
+
+        assert_eq!(args.name, "workers");
     }
 
     #[test]

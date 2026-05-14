@@ -10,10 +10,10 @@ use std::{
 use crate::{
     bundle::{self, BundleDocument, BundleExportOptions},
     cli::{
-        AssetsSubcommand, BundlesSubcommand, Cli, CmdSubcommand, Command, EnvSubcommand,
-        ImportAssetsArgs, ImportEnvArgs, ImportSubcommand, JwtSubcommand, PingSubcommand,
-        PkiSubcommand, ProfileArgs, ProfileSubcommand, ResourcesAddSubcommand, ResourcesSubcommand,
-        RollbackArgs,
+        AssetsSubcommand, BundleVersionsArgs, BundlesSubcommand, Cli, CmdSubcommand, Command,
+        EnvSubcommand, ImportAssetsArgs, ImportEnvArgs, ImportSubcommand, JwtSubcommand,
+        PingSubcommand, PkiSubcommand, ProfileArgs, ProfileSubcommand, ResourcesAddSubcommand,
+        ResourcesSubcommand, RollbackArgs,
     },
     crypto::{encrypt_file_payload, maybe_decrypt_file_payload},
     envfile::{apply_prefix, parse_env_bytes, parse_reference_value},
@@ -26,8 +26,8 @@ use crate::{
         FileSpec, PingTarget, Profile, ResourceRegistryEntry,
     },
     registry::{
-        RegistryEntryStatus, append_history_entry, current_bundle_path, current_version,
-        global_passphrase_store_key, load_registry, mark_history_entry,
+        RegistryEntryStatus, RegistryTrack, append_history_entry, current_bundle_path,
+        current_version, global_passphrase_store_key, load_registry, mark_history_entry,
         previous_successful_bundle_path, reset_runvault_root, runvault_root, save_registry,
         track_bundle_dir,
     },
@@ -81,6 +81,22 @@ pub struct ResourceListing {
     pub name: String,
     pub kind: String,
     pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundleListing {
+    pub name: String,
+    pub current_version: Option<String>,
+    pub version_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundleVersionListing {
+    pub name: String,
+    pub version: String,
+    pub status: RegistryEntryStatus,
+    pub current: bool,
+    pub bundle_path: PathBuf,
 }
 
 impl Default for Runvault {
@@ -203,6 +219,8 @@ impl Runvault {
                     self.run_profile_or_bundle_command(global_profile, profile.as_ref(), args)
                         .await
                 }
+                BundlesSubcommand::List(_) => self.list_bundles(),
+                BundlesSubcommand::Versions(args) => self.list_bundle_versions(&args),
             },
             Command::Cmd(args) => match args.command {
                 CmdSubcommand::Set(set) => {
@@ -715,6 +733,61 @@ impl Runvault {
             println!(
                 "{:<32} {:<13} {:<32} {}",
                 material.name, material.kind, material.common_name, "cert, key, chain"
+            );
+        }
+        Ok(())
+    }
+
+    pub fn bundles(&self) -> Result<Vec<BundleListing>, Error> {
+        let registry = load_registry()?;
+        Ok(registry
+            .tracks
+            .iter()
+            .map(|(name, track)| BundleListing {
+                name: name.clone(),
+                current_version: track
+                    .current_history_index
+                    .and_then(|index| track.history.get(index))
+                    .map(|entry| entry.version.clone()),
+                version_count: bundle_version_entries(name, track).len(),
+            })
+            .collect())
+    }
+
+    pub fn bundle_versions(&self, name: &str) -> Result<Vec<BundleVersionListing>, Error> {
+        validate_bundle_name(name)?;
+        let registry = load_registry()?;
+        let track = registry
+            .tracks
+            .get(name)
+            .ok_or_else(|| Error::Registry(format!("bundle '{}' is not registered", name)))?;
+        Ok(bundle_version_entries(name, track))
+    }
+
+    pub fn list_bundles(&self) -> Result<(), Error> {
+        let bundles = self.bundles()?;
+        println!("{:<32} {:<20} VERSIONS", "NAME", "CURRENT");
+        for bundle in bundles {
+            println!(
+                "{:<32} {:<20} {}",
+                bundle.name,
+                bundle.current_version.as_deref().unwrap_or("-"),
+                bundle.version_count
+            );
+        }
+        Ok(())
+    }
+
+    fn list_bundle_versions(&self, args: &BundleVersionsArgs) -> Result<(), Error> {
+        let versions = self.bundle_versions(&args.name)?;
+        println!("{:<20} {:<10} {:<8} PATH", "VERSION", "STATUS", "CURRENT");
+        for version in versions {
+            println!(
+                "{:<20} {:<10} {:<8} {}",
+                version.version,
+                registry_status_label(version.status),
+                if version.current { "yes" } else { "no" },
+                version.bundle_path.display()
             );
         }
         Ok(())
@@ -1431,6 +1504,55 @@ fn validate_bundle_name(name: &str) -> Result<(), Error> {
     Ok(())
 }
 
+fn bundle_version_entries(name: &str, track: &RegistryTrack) -> Vec<BundleVersionListing> {
+    let current_version = track
+        .current_history_index
+        .and_then(|index| track.history.get(index))
+        .map(|entry| entry.version.as_str());
+    let mut versions: BTreeMap<String, BundleVersionListing> = BTreeMap::new();
+    for entry in &track.history {
+        let listing =
+            versions
+                .entry(entry.version.clone())
+                .or_insert_with(|| BundleVersionListing {
+                    name: name.to_string(),
+                    version: entry.version.clone(),
+                    status: entry.status,
+                    current: current_version.is_some_and(|current| current == entry.version),
+                    bundle_path: entry.bundle_path.clone(),
+                });
+        listing.current = current_version.is_some_and(|current| current == entry.version);
+        listing.status = merge_registry_status(listing.status, entry.status);
+        if entry.status == RegistryEntryStatus::Succeeded {
+            listing.bundle_path = entry.bundle_path.clone();
+        }
+    }
+    versions.into_values().collect()
+}
+
+fn merge_registry_status(
+    left: RegistryEntryStatus,
+    right: RegistryEntryStatus,
+) -> RegistryEntryStatus {
+    match (left, right) {
+        (RegistryEntryStatus::Succeeded, _) | (_, RegistryEntryStatus::Succeeded) => {
+            RegistryEntryStatus::Succeeded
+        }
+        (RegistryEntryStatus::Failed, _) | (_, RegistryEntryStatus::Failed) => {
+            RegistryEntryStatus::Failed
+        }
+        _ => RegistryEntryStatus::Registered,
+    }
+}
+
+fn registry_status_label(status: RegistryEntryStatus) -> &'static str {
+    match status {
+        RegistryEntryStatus::Registered => "registered",
+        RegistryEntryStatus::Succeeded => "succeeded",
+        RegistryEntryStatus::Failed => "failed",
+    }
+}
+
 fn global_resources_path() -> Result<PathBuf, Error> {
     Ok(runvault_root()?.join("resources.yaml"))
 }
@@ -1698,7 +1820,13 @@ fn infer_asset_key(target_path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::Runvault;
-    use crate::profile::{self, CreateProfileOptions, Profile};
+    use crate::{
+        profile::{self, CreateProfileOptions, Profile},
+        registry::{
+            RegistryDocument, RegistryEntryStatus, append_history_entry, mark_history_entry,
+            save_registry,
+        },
+    };
     use std::{
         path::{Path, PathBuf},
         sync::Mutex,
@@ -1706,6 +1834,57 @@ mod tests {
     use tempfile::tempdir;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn bundle_listing_returns_registered_names_and_versions() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let previous_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", dir.path());
+        }
+
+        let mut registry = RegistryDocument::default();
+        let v1 = append_history_entry(
+            &mut registry,
+            "workers",
+            "v1",
+            PathBuf::from("/tmp/workers/v1/bundle.yaml"),
+        )
+        .unwrap();
+        mark_history_entry(&mut registry, "workers", v1, RegistryEntryStatus::Succeeded).unwrap();
+        let v2 = append_history_entry(
+            &mut registry,
+            "workers",
+            "v2",
+            PathBuf::from("/tmp/workers/v2/bundle.yaml"),
+        )
+        .unwrap();
+        mark_history_entry(&mut registry, "workers", v2, RegistryEntryStatus::Failed).unwrap();
+        save_registry(&registry).unwrap();
+
+        let bundles = Runvault::default().bundles().unwrap();
+        assert_eq!(bundles.len(), 1);
+        assert_eq!(bundles[0].name, "workers");
+        assert_eq!(bundles[0].current_version.as_deref(), Some("v1"));
+        assert_eq!(bundles[0].version_count, 2);
+
+        let versions = Runvault::default().bundle_versions("workers").unwrap();
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].version, "v1");
+        assert_eq!(versions[0].status, RegistryEntryStatus::Succeeded);
+        assert!(versions[0].current);
+        assert_eq!(versions[1].version, "v2");
+        assert_eq!(versions[1].status, RegistryEntryStatus::Failed);
+        assert!(!versions[1].current);
+
+        unsafe {
+            match previous_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
 
     #[test]
     fn import_assets_resolves_at_source_from_resources_first() {
