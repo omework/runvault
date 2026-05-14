@@ -503,6 +503,7 @@ You can bulk-load profile assets from a YAML file:
 
 ```bash
 runvault assets import deployments/ovh/services assets.yaml
+runvault assets import @run.assets
 ```
 
 Spec format:
@@ -526,6 +527,8 @@ This import spec format is intentionally different from `runvault.yaml`:
 Behavior:
 
 - assets are written into `runvault.yaml`, not into `env.sec`
+- import spec file arguments can be paths or strict `@name` references to file resources in the global resources registry
+- `assets import @name` fails if `name` is missing, is not a file resource, or does not point to a valid assets import spec
 - asset specs can use direct `src`, `src: "@name"`, or legacy `ref`
 - `src: "@name"` looks up `name` in the global resources registry first
 - if no registry entry exists, `src: "@name"` falls back to `name` as a source path relative to the spec file

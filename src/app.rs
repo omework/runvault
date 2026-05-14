@@ -795,11 +795,12 @@ impl Runvault {
         profile::ensure_default_profile_exists(&profile_input)?;
         let profile_path = profile::resolve_profile_path(&profile_input);
         let mut loaded = Profile::from_path(&profile_path)?;
+        let resources = load_global_resources()?;
 
         for input_path in input_paths {
-            let document = profile::load_asset_import_document(input_path)?;
-            let resources = load_global_resources()?;
+            let input_path = resolve_import_document_path(&resources, input_path)?;
             let base_dir = input_path.parent().unwrap_or_else(|| Path::new("."));
+            let document = profile::load_asset_import_document(&input_path)?;
             for (key, spec) in document.assets {
                 let spec = resolve_asset_import_spec(&resources, spec, base_dir)?;
                 apply_asset_import_spec(&mut loaded, &key, spec)?;
@@ -1530,6 +1531,29 @@ fn resolve_file_import_spec(
     Ok(spec)
 }
 
+fn resolve_import_document_path(
+    resources: &BTreeMap<String, ResourceRegistryEntry>,
+    path: &Path,
+) -> Result<PathBuf, Error> {
+    let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if let Some(ref_name) = parse_source_reference(path) {
+        return match resources.get(&ref_name) {
+            Some(ResourceRegistryEntry::File { path, .. }) => {
+                profile::resolve_source_path(path, &base_dir)
+            }
+            Some(ResourceRegistryEntry::Text { .. }) => Err(Error::InvalidImportSpec(format!(
+                "import document ref '{}' must point to a file resource",
+                ref_name
+            ))),
+            None => Err(Error::InvalidImportSpec(format!(
+                "import document ref '{}' does not exist",
+                ref_name
+            ))),
+        };
+    }
+    profile::resolve_source_path(path, &base_dir)
+}
+
 fn resolve_file_registry_ref(
     resources: &BTreeMap<String, ResourceRegistryEntry>,
     spec: &mut FileImportSpec,
@@ -1727,6 +1751,93 @@ assets:
         let profile = Profile::from_path(&profile_dir.join(profile::DEFAULT_PROFILE_FILE)).unwrap();
         let spec = profile.assets().get("CADDY_CONFIG_FILE").unwrap();
         assert_eq!(spec.source_path, dir.path().join("Caddyfile"));
+
+        unsafe {
+            match previous_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn import_assets_loads_spec_file_from_resource_reference() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let previous_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", dir.path());
+        }
+        let profile_dir = dir.path().join("profile");
+        profile::create_profile(
+            &profile_dir,
+            &CreateProfileOptions {
+                name: Some("test".to_string()),
+                env_file: PathBuf::from("env.sec"),
+            },
+        )
+        .unwrap();
+
+        let specs_dir = dir.path().join("specs");
+        std::fs::create_dir_all(&specs_dir).unwrap();
+        std::fs::write(specs_dir.join("Caddyfile"), ":443 { respond ok }\n").unwrap();
+        let spec_path = specs_dir.join("run.assets.yaml");
+        std::fs::write(
+            &spec_path,
+            r#"
+assets:
+  CADDY_CONFIG_FILE:
+    src: ./Caddyfile
+    to-file: ./Caddyfile
+"#,
+        )
+        .unwrap();
+
+        Runvault::default()
+            .add_file_resource("run.assets", spec_path.clone(), None)
+            .unwrap();
+        Runvault::default()
+            .import_asset_specs(Some(&profile_dir), &[PathBuf::from("@run.assets")])
+            .unwrap();
+
+        let profile = Profile::from_path(&profile_dir.join(profile::DEFAULT_PROFILE_FILE)).unwrap();
+        let spec = profile.assets().get("CADDY_CONFIG_FILE").unwrap();
+        assert_eq!(spec.source_path, specs_dir.join("Caddyfile"));
+
+        unsafe {
+            match previous_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn import_assets_rejects_missing_spec_file_resource_reference() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let previous_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", dir.path());
+        }
+        let profile_dir = dir.path().join("profile");
+        profile::create_profile(
+            &profile_dir,
+            &CreateProfileOptions {
+                name: Some("test".to_string()),
+                env_file: PathBuf::from("env.sec"),
+            },
+        )
+        .unwrap();
+
+        let err = Runvault::default()
+            .import_asset_specs(Some(&profile_dir), &[PathBuf::from("@run.assets")])
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("import document ref 'run.assets' does not exist")
+        );
 
         unsafe {
             match previous_home {
