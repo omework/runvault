@@ -29,6 +29,8 @@ pub struct BundleDocument {
     #[serde(default = "default_bundle_schema_version")]
     pub schema_version: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -95,7 +97,8 @@ pub struct VisibleVaultWrappedKeyMetadata {
 
 #[derive(Debug, Clone)]
 pub struct BundleExportOptions {
-    pub version: Option<String>,
+    pub name: String,
+    pub version: String,
     pub description: Option<String>,
     pub force: bool,
 }
@@ -162,7 +165,8 @@ pub fn export_bundle(
 
     let bundle = BundleDocument {
         schema_version: default_bundle_schema_version(),
-        version: options.version.clone(),
+        name: Some(options.name.clone()),
+        version: Some(options.version.clone()),
         description: options.description.clone(),
         profile,
         visible_vault_crypto,
@@ -246,6 +250,20 @@ fn validate_bundle(bundle: &BundleDocument) -> Result<(), Error> {
         return Err(Error::InvalidBundle(
             "bundled profile name must not be empty".to_string(),
         ));
+    }
+    if let Some(name) = &bundle.name {
+        if name.trim().is_empty() {
+            return Err(Error::InvalidBundle(
+                "bundle name must not be empty".to_string(),
+            ));
+        }
+    }
+    if let Some(version) = &bundle.version {
+        if version.trim().is_empty() {
+            return Err(Error::InvalidBundle(
+                "bundle version must not be empty".to_string(),
+            ));
+        }
     }
     if bundle.profile.run.cmd.is_empty() {
         return Err(Error::InvalidBundle(
@@ -704,7 +722,8 @@ run:
             &profile_dir,
             &bundle_path,
             &BundleExportOptions {
-                version: Some("1.2.3".to_string()),
+                name: "workers".to_string(),
+                version: "1.2.3".to_string(),
                 description: Some("test bundle".to_string()),
                 force: false,
             },
@@ -743,6 +762,7 @@ run:
                 .mode,
             "0600"
         );
+        assert_eq!(bundle.name.as_deref(), Some("workers"));
         assert_eq!(bundle.version.as_deref(), Some("1.2.3"));
         assert_eq!(bundle.description.as_deref(), Some("test bundle"));
 
@@ -807,7 +827,8 @@ run:
             dir.path(),
             &bundle_path,
             &BundleExportOptions {
-                version: None,
+                name: "workers".to_string(),
+                version: "1.2.3".to_string(),
                 description: None,
                 force: false,
             },
@@ -858,7 +879,8 @@ run:
             &profile_dir,
             &bundle_path,
             &BundleExportOptions {
-                version: None,
+                name: "workers".to_string(),
+                version: "1.0.0".to_string(),
                 description: None,
                 force: false,
             },
@@ -874,7 +896,8 @@ run:
             &profile_dir,
             &bundle_path,
             &BundleExportOptions {
-                version: Some("2.0.0".to_string()),
+                name: "workers".to_string(),
+                version: "2.0.0".to_string(),
                 description: Some("forced bundle".to_string()),
                 force: true,
             },

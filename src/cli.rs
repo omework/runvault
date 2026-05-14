@@ -19,7 +19,6 @@ pub enum Command {
     Cmd(CmdCommand),
     #[command(hide = true, name = "init", alias = "create-profile")]
     Init(CreateProfileArgs),
-    #[command(hide = true)]
     Bundle(BundleArgs),
     #[command(hide = true)]
     Reset,
@@ -40,10 +39,8 @@ pub enum Command {
     UnsetFrom(UnsetFromArgs),
     #[command(hide = true)]
     Reveal(RevealArgs),
-    #[command(hide = true)]
     Run(ProfileArgs),
-    #[command(hide = true)]
-    Rollback(ProfileArgs),
+    Rollback(RollbackArgs),
     Ping(PingCommand),
 }
 
@@ -58,8 +55,10 @@ pub enum ProfileSubcommand {
     #[command(alias = "create")]
     Init(CreateProfileArgs),
     Reset,
+    #[command(hide = true)]
     Run(ProfileArgs),
-    Rollback(ProfileArgs),
+    #[command(hide = true)]
+    Rollback(RollbackArgs),
 }
 
 #[derive(Debug, Args)]
@@ -89,8 +88,10 @@ pub enum CmdSubcommand {
 pub struct BundleArgs {
     #[arg(value_name = "PROFILE_OR_OUTPUT", num_args = 1..=2)]
     pub targets: Vec<PathBuf>,
+    #[arg(long = "name")]
+    pub name: String,
     #[arg(long)]
-    pub version: Option<String>,
+    pub version: String,
     #[arg(long)]
     pub description: Option<String>,
     #[arg(long)]
@@ -374,7 +375,16 @@ pub struct RevealArgs {
 
 #[derive(Debug, Args)]
 pub struct ProfileArgs {
+    #[arg(value_name = "BUNDLE")]
     pub profile: Option<PathBuf>,
+    #[arg(long = "name")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct RollbackArgs {
+    #[arg(long = "name")]
+    pub name: String,
 }
 
 #[derive(Debug, Args)]
@@ -1083,8 +1093,17 @@ mod tests {
 
     #[test]
     fn bundle_export_defaults_to_dot_vault_for_output_path() {
-        let cli =
-            Cli::try_parse_from(["runvault", "bundles", "export", "profile.bundle.yaml"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "runvault",
+            "bundles",
+            "export",
+            "profile.bundle.yaml",
+            "--name",
+            "workers",
+            "--version",
+            "v1",
+        ])
+        .unwrap();
 
         let Command::Bundles(args) = cli.command else {
             panic!("expected bundles command");
@@ -1096,7 +1115,82 @@ mod tests {
         let (profile, output) = args.resolve(None);
         assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
         assert_eq!(output, PathBuf::from("profile.bundle.yaml"));
+        assert_eq!(args.name, "workers");
+        assert_eq!(args.version, "v1");
         assert!(!args.force);
+    }
+
+    #[test]
+    fn bundle_shortcut_parses_like_bundles_export() {
+        let cli = Cli::try_parse_from([
+            "runvault",
+            "bundle",
+            "profile.bundle.yaml",
+            "--name",
+            "workers",
+            "--version",
+            "v1",
+        ])
+        .unwrap();
+
+        let Command::Bundle(args) = cli.command else {
+            panic!("expected bundle shortcut command");
+        };
+
+        let (profile, output) = args.resolve(None);
+        assert_eq!(profile, PathBuf::from(DEFAULT_PROFILE_DIR));
+        assert_eq!(output, PathBuf::from("profile.bundle.yaml"));
+        assert_eq!(args.name, "workers");
+        assert_eq!(args.version, "v1");
+    }
+
+    #[test]
+    fn run_shortcut_parses_bundle_path() {
+        let cli = Cli::try_parse_from(["runvault", "run", "profile.bundle.yaml"]).unwrap();
+
+        let Command::Run(args) = cli.command else {
+            panic!("expected run shortcut command");
+        };
+
+        assert_eq!(args.profile, Some(PathBuf::from("profile.bundle.yaml")));
+        assert_eq!(args.name, None);
+    }
+
+    #[test]
+    fn run_shortcut_parses_registered_name() {
+        let cli = Cli::try_parse_from(["runvault", "run", "--name", "workers"]).unwrap();
+
+        let Command::Run(args) = cli.command else {
+            panic!("expected run shortcut command");
+        };
+
+        assert_eq!(args.profile, None);
+        assert_eq!(args.name.as_deref(), Some("workers"));
+    }
+
+    #[test]
+    fn rollback_shortcut_parses_registered_name() {
+        let cli = Cli::try_parse_from(["runvault", "rollback", "--name", "workers"]).unwrap();
+
+        let Command::Rollback(args) = cli.command else {
+            panic!("expected rollback shortcut command");
+        };
+
+        assert_eq!(args.name, "workers");
+    }
+
+    #[test]
+    fn rollback_shortcut_rejects_positional_profile() {
+        let err = Cli::try_parse_from([
+            "runvault",
+            "rollback",
+            "deployments/ovh",
+            "--name",
+            "workers",
+        ])
+        .unwrap_err();
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
@@ -1106,6 +1200,10 @@ mod tests {
             "bundles",
             "export",
             "profile.bundle.yaml",
+            "--name",
+            "workers",
+            "--version",
+            "v1",
             "--force",
         ])
         .unwrap();

@@ -13,6 +13,7 @@ use crate::{
         AssetsSubcommand, BundlesSubcommand, Cli, CmdSubcommand, Command, EnvSubcommand,
         ImportAssetsArgs, ImportEnvArgs, ImportSubcommand, JwtSubcommand, PingSubcommand,
         PkiSubcommand, ProfileArgs, ProfileSubcommand, ResourcesAddSubcommand, ResourcesSubcommand,
+        RollbackArgs,
     },
     crypto::{encrypt_file_payload, maybe_decrypt_file_payload},
     envfile::{apply_prefix, parse_env_bytes, parse_reference_value},
@@ -343,6 +344,7 @@ impl Runvault {
             Some(profile_input.as_path()),
             &output_path,
             &BundleExportOptions {
+                name: args.name,
                 version: args.version,
                 description: args.description,
                 force: args.force,
@@ -445,38 +447,29 @@ impl Runvault {
 
     async fn run_profile_or_bundle_command(
         &self,
-        global_profile: Option<&Path>,
-        profile: Option<&PathBuf>,
+        _global_profile: Option<&Path>,
+        _profile: Option<&PathBuf>,
         args: ProfileArgs,
     ) -> Result<(), Error> {
         if let Some(target) = args.profile.as_deref() {
-            if global_profile.is_none() && looks_like_profile_input(target) {
-                self.run_profile(target).await
-            } else {
-                self.run_bundle(target).await
-            }
+            self.run_bundle(target).await
         } else {
-            let profile_input = args.explicit_profile(profile).ok_or_else(|| {
+            let name = args.name.as_deref().ok_or_else(|| {
                 Error::Registry(
-                    "run without a bundle requires --profile so the bundle track can be resolved"
+                    "run requires a bundle path or --name so the registered bundle can be resolved"
                         .to_string(),
                 )
             })?;
-            self.run_registered_profile(&profile_input).await
+            self.run_registered_service(name).await
         }
     }
 
     async fn run_rollback_command(
         &self,
-        global_profile: Option<&PathBuf>,
-        args: ProfileArgs,
+        _global_profile: Option<&PathBuf>,
+        args: RollbackArgs,
     ) -> Result<(), Error> {
-        let profile_input = args.explicit_profile(global_profile).ok_or_else(|| {
-            Error::Registry(
-                "rollback requires --profile so the bundle track can be resolved".to_string(),
-            )
-        })?;
-        self.rollback_profile(&profile_input).await
+        self.rollback_service(&args.name).await
     }
 
     fn run_import_env_command(
@@ -1116,13 +1109,10 @@ impl Runvault {
         }
     }
 
-    pub async fn run_registered_profile(&self, profile_input: &Path) -> Result<(), Error> {
-        profile::ensure_default_profile_exists(profile_input)?;
-        let profile_path = profile::resolve_profile_path(profile_input);
-        let loaded = Profile::from_path(&profile_path)?;
-        let track = loaded.name.clone();
+    pub async fn run_registered_service(&self, name: &str) -> Result<(), Error> {
+        validate_bundle_name(name)?;
         let registry = load_registry()?;
-        let bundle_path = current_bundle_path(&registry, &track)?;
+        let bundle_path = current_bundle_path(&registry, name)?;
         let bundle_dir = bundle_path
             .parent()
             .ok_or_else(|| {
@@ -1135,14 +1125,10 @@ impl Runvault {
         self.execute_bundle_at_path(&bundle_path, &bundle_dir).await
     }
 
-    pub async fn rollback_profile(&self, profile_input: &Path) -> Result<(), Error> {
-        profile::ensure_default_profile_exists(profile_input)?;
-        let profile_path = profile::resolve_profile_path(profile_input);
-        let loaded = Profile::from_path(&profile_path)?;
-        let track = loaded.name.clone();
-
+    pub async fn rollback_service(&self, name: &str) -> Result<(), Error> {
+        validate_bundle_name(name)?;
         let mut registry = load_registry()?;
-        let bundle_path = previous_successful_bundle_path(&registry, &track)?;
+        let bundle_path = previous_successful_bundle_path(&registry, name)?;
         let bundle = bundle::load_bundle(&bundle_path)?;
         let version = bundle_version(&bundle)?;
         let bundle_dir = bundle_path
@@ -1155,17 +1141,17 @@ impl Runvault {
             })?
             .to_path_buf();
 
-        let index = append_history_entry(&mut registry, &track, &version, bundle_path.clone())?;
+        let index = append_history_entry(&mut registry, name, &version, bundle_path.clone())?;
         save_registry(&registry)?;
 
         match self.execute_bundle_at_path(&bundle_path, &bundle_dir).await {
             Ok(()) => {
-                mark_history_entry(&mut registry, &track, index, RegistryEntryStatus::Succeeded)?;
+                mark_history_entry(&mut registry, name, index, RegistryEntryStatus::Succeeded)?;
                 save_registry(&registry)?;
                 Ok(())
             }
             Err(err) => {
-                mark_history_entry(&mut registry, &track, index, RegistryEntryStatus::Failed)?;
+                mark_history_entry(&mut registry, name, index, RegistryEntryStatus::Failed)?;
                 save_registry(&registry)?;
                 Err(err)
             }
@@ -1419,19 +1405,29 @@ fn bundle_version(bundle: &BundleDocument) -> Result<String, Error> {
 }
 
 fn bundle_track_name(bundle: &BundleDocument) -> Result<String, Error> {
-    let track = bundle.profile.name.trim();
-    if track.is_empty() {
-        return Err(Error::InvalidBundle(
-            "bundle profile.name must not be empty".to_string(),
-        ));
-    }
-    Ok(track.to_string())
+    let name = bundle_name(bundle)?;
+    validate_bundle_name(&name)?;
+    Ok(name)
 }
 
-fn looks_like_profile_input(path: &Path) -> bool {
-    path.file_name().is_some_and(|name| name == "runvault.yaml")
-        || path.is_dir()
-        || path.join("runvault.yaml").exists()
+fn bundle_name(bundle: &BundleDocument) -> Result<String, Error> {
+    bundle
+        .name
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            Error::InvalidBundle(
+                "bundle name is required for registry-backed execution".to_string(),
+            )
+        })
+}
+
+fn validate_bundle_name(name: &str) -> Result<(), Error> {
+    if name.trim().is_empty() {
+        return Err(Error::Registry("bundle name must not be empty".to_string()));
+    }
+    Ok(())
 }
 
 fn global_resources_path() -> Result<PathBuf, Error> {

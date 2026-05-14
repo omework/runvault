@@ -63,7 +63,6 @@ If you omit the profile path, `runvault` now defaults to:
 You can also target a profile explicitly with the global `--profile` / `-p` flag:
 
 ```bash
-runvault --profile deployments/ovh/services profile run
 runvault -p deployments/ovh/services env import .env.local
 runvault -p deployments/ovh/services cmd set -- docker compose up -d
 ```
@@ -75,11 +74,11 @@ The flag takes precedence over legacy positional profile arguments.
 ```bash
 runvault profile init
 runvault profile init deployments/ovh/services
-runvault --profile deployments/ovh/services profile run
 runvault profile reset
-runvault bundles export services.bundle.yaml --version v1.0.0 --description "OVH services profile"
-runvault bundles run services.bundle.yaml
-runvault --profile deployments/ovh/services profile rollback
+runvault bundle services.bundle.yaml --name ovh-services --version v1.0.0 --description "OVH services profile"
+runvault run services.bundle.yaml
+runvault run --name ovh-services
+runvault rollback --name ovh-services
 runvault jwt generate --issuer runvault --audience tempo --subject worker --ttl 15m
 runvault env set DATABASE_URL --value postgres://...
 runvault env set deployments/ovh/services DATABASE_URL --value postgres://...
@@ -112,7 +111,6 @@ runvault env unset-from .env .env.local
 runvault env unset-from deployments/ovh/services .env .env.local
 runvault env reveal DATABASE_URL
 runvault env reveal GOOGLE_APPLICATION_CREDENTIALS --raw
-runvault profile run
 runvault ping check
 ```
 
@@ -230,7 +228,7 @@ run:
   cmd: ["echo", "configure run.cmd in runvault.yaml"]
 ```
 
-Edit that before you rely on `runvault profile run`.
+Edit that before packaging and running the profile as a bundle.
 
 You can also set the run command from the CLI:
 
@@ -268,28 +266,33 @@ You can package a profile into a single file that contains:
 Export a bundle with:
 
 ```bash
-runvault bundles export services.bundle.yaml
+runvault bundle services.bundle.yaml --name ovh-services --version v1.0.0
 runvault bundles export deployments/ovh/services/vault services.bundle.yaml \
+  --name ovh-services \
   --version v1.0.0 \
   --description "OVH services deployment"
-runvault bundles export deployments/ovh/services/vault services.bundle.yaml --force
+runvault bundles export deployments/ovh/services/vault services.bundle.yaml \
+  --name ovh-services \
+  --version v1.0.0 \
+  --force
 ```
 
 Run it later with:
 
 ```bash
-runvault bundles run services.bundle.yaml
-runvault --profile deployments/ovh/services profile run
-runvault --profile deployments/ovh/services profile rollback
+runvault run services.bundle.yaml
+runvault run --name ovh-services
+runvault rollback --name ovh-services
 ```
 
 Behavior:
 
-- `bundles export` defaults to `./.vault` if no profile is specified
+- `bundle` is the shortcut for `bundles export`; it requires `--name` and `--version`, and defaults to `./.vault` if no profile is specified
 - existing bundle targets are rejected by default; use `--force` to overwrite them
-- `bundles run <bundle-file>` requires a bundle `version`, copies the bundle into `~/.runvault/bundles/<profile.name>/<version>/bundle.yaml`, materializes the bundled profile there, and runs from that stored directory
-- `profile run --profile <path>` with no bundle reruns the current successful bundle registered for that profile's `name`
-- `profile rollback --profile <path>` reruns the previous successful registered bundle for that profile's `name`
+- `run <bundle-file>` is the shortcut for `bundles run <bundle-file>`; it requires bundle `name` and `version`, copies the bundle into `~/.runvault/bundles/<name>/<version>/bundle.yaml`, materializes the bundled profile there, and runs from that stored directory
+- `run --name <name>` reruns the current successful bundle registered for that bundle name
+- `rollback --name <name>` reruns the previous successful registered bundle for that bundle name
+- profile paths are packaging inputs; runtime registry identity comes from the exported bundle `--name`
 - registry history is stored in `~/.runvault/registry.yaml` and version order follows deployment history, not semantic version sorting
 - password reuse for registered bundle execution uses the same global passphrase cache as normal profile operations
 - profile `assets:` are copied into the bundle and restored before execution
