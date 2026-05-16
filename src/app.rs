@@ -821,6 +821,7 @@ impl Runvault {
         };
 
         let mut referenced_specs: BTreeMap<(PathBuf, String), FileImportSpec> = BTreeMap::new();
+        let resources = load_global_resources()?;
         for input_path in input_paths {
             let input = std::fs::read(input_path).map_err(|source| Error::ReadFile {
                 path: input_path.clone(),
@@ -834,28 +835,32 @@ impl Runvault {
             let vars = apply_prefix(vars, prefix.unwrap_or(""))?;
             for (key, value) in vars {
                 if let Some(reference) = parse_reference_value(&value) {
-                    let reference_path =
-                        profile::resolve_source_path(Path::new(&reference), &input_dir)?;
-                    let spec = if let Some(spec) =
-                        referenced_specs.get(&(reference_path.clone(), key.clone()))
-                    {
-                        spec.clone()
+                    let spec = if let Some(entry) = resources.get(&reference) {
+                        file_import_spec_from_resource_entry(entry, &input_dir)?
                     } else {
-                        let document = profile::load_file_import_document(&reference_path)?;
-                        let spec = document.files.get(&key).cloned().ok_or_else(|| {
-                            Error::InvalidImportSpec(format!(
-                                "reference file '{}' does not define key '{}'",
-                                reference_path.display(),
-                                key
-                            ))
-                        })?;
-                        let reference_base_dir =
-                            reference_path.parent().unwrap_or_else(|| Path::new("."));
-                        let resources = load_global_resources()?;
-                        let spec = resolve_file_import_spec(&resources, spec, reference_base_dir)?;
-                        referenced_specs
-                            .insert((reference_path.clone(), key.clone()), spec.clone());
-                        spec
+                        let reference_path =
+                            profile::resolve_source_path(Path::new(&reference), &input_dir)?;
+                        if let Some(spec) =
+                            referenced_specs.get(&(reference_path.clone(), key.clone()))
+                        {
+                            spec.clone()
+                        } else {
+                            let document = profile::load_file_import_document(&reference_path)?;
+                            let spec = document.files.get(&key).cloned().ok_or_else(|| {
+                                Error::InvalidImportSpec(format!(
+                                    "reference file '{}' does not define key '{}'",
+                                    reference_path.display(),
+                                    key
+                                ))
+                            })?;
+                            let reference_base_dir =
+                                reference_path.parent().unwrap_or_else(|| Path::new("."));
+                            let spec =
+                                resolve_file_import_spec(&resources, spec, reference_base_dir)?;
+                            referenced_specs
+                                .insert((reference_path.clone(), key.clone()), spec.clone());
+                            spec
+                        }
                     };
                     apply_file_import_spec(&mut loaded, &mut vault, &key, spec, &password)?;
                 } else {
@@ -1642,6 +1647,30 @@ fn resource_info_from_entry(name: &str, entry: &ResourceRegistryEntry) -> Resour
     }
 }
 
+fn file_import_spec_from_resource_entry(
+    entry: &ResourceRegistryEntry,
+    base_dir: &Path,
+) -> Result<FileImportSpec, Error> {
+    match entry {
+        ResourceRegistryEntry::File { path, .. } => Ok(FileImportSpec {
+            src: Some(profile::resolve_source_path(path, base_dir)?),
+            ref_name: None,
+            to_file: None,
+            mode: "0600".to_string(),
+            cleanup: None,
+            resolved_value: None,
+        }),
+        ResourceRegistryEntry::Text { value, .. } => Ok(FileImportSpec {
+            src: None,
+            ref_name: None,
+            to_file: None,
+            mode: "0600".to_string(),
+            cleanup: None,
+            resolved_value: Some(value.as_bytes().to_vec()),
+        }),
+    }
+}
+
 fn apply_file_import_spec(
     profile: &mut Profile,
     vault: &mut VaultDocument,
@@ -1872,14 +1901,17 @@ fn infer_asset_key(target_path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::Runvault;
+    use super::{Runvault, apply_file_import_spec, file_import_spec_from_resource_entry};
     use crate::{
-        profile::{self, CreateProfileOptions, Profile},
+        profile::{self, CreateProfileOptions, Profile, ResourceRegistryEntry, RunConfig},
         registry::{
             RegistryDocument, RegistryEntryStatus, append_history_entry, mark_history_entry,
             save_registry,
         },
+        vault::{VaultDocument, VaultValue},
     };
+    use age::secrecy::SecretString;
+    use std::collections::BTreeMap;
     use std::{
         path::{Path, PathBuf},
         sync::Mutex,
@@ -1887,6 +1919,61 @@ mod tests {
     use tempfile::tempdir;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn dotenv_resource_file_reference_imports_file_content_as_plain_env_value() {
+        let dir = tempdir().unwrap();
+        let secret_path = dir.path().join("admin-password.txt");
+        std::fs::write(&secret_path, "secret-password").unwrap();
+        let resource = ResourceRegistryEntry::File {
+            description: None,
+            path: secret_path,
+        };
+        let spec = file_import_spec_from_resource_entry(&resource, dir.path()).unwrap();
+        let mut profile = test_profile();
+        let mut vault = VaultDocument::default();
+
+        apply_file_import_spec(
+            &mut profile,
+            &mut vault,
+            "BOOTGATE_ADMIN_PASSWORD",
+            spec,
+            &SecretString::from("unused".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            vault.entries().get("BOOTGATE_ADMIN_PASSWORD"),
+            Some(&VaultValue::PlainText("secret-password".to_string()))
+        );
+        assert!(profile.file_spec("BOOTGATE_ADMIN_PASSWORD").is_none());
+    }
+
+    #[test]
+    fn dotenv_resource_text_reference_imports_text_as_plain_env_value() {
+        let resource = ResourceRegistryEntry::Text {
+            description: None,
+            value: "secret-password".to_string(),
+        };
+        let spec = file_import_spec_from_resource_entry(&resource, Path::new(".")).unwrap();
+        let mut profile = test_profile();
+        let mut vault = VaultDocument::default();
+
+        apply_file_import_spec(
+            &mut profile,
+            &mut vault,
+            "BOOTGATE_ADMIN_PASSWORD",
+            spec,
+            &SecretString::from("unused".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            vault.entries().get("BOOTGATE_ADMIN_PASSWORD"),
+            Some(&VaultValue::PlainText("secret-password".to_string()))
+        );
+        assert!(profile.file_spec("BOOTGATE_ADMIN_PASSWORD").is_none());
+    }
 
     #[test]
     fn bundle_listing_returns_registered_names_and_versions() {
@@ -2230,6 +2317,24 @@ resources:
                 Some(value) => std::env::set_var("HOME", value),
                 None => std::env::remove_var("HOME"),
             }
+        }
+    }
+
+    fn test_profile() -> Profile {
+        Profile {
+            name: "test".to_string(),
+            env_file: PathBuf::from("env.sec"),
+            workdir: None,
+            files: BTreeMap::new(),
+            assets: BTreeMap::new(),
+            resources: BTreeMap::new(),
+            run: RunConfig {
+                cmd: vec!["true".to_string()],
+                clear_env: false,
+                pass_env: Vec::new(),
+            },
+            pings: Vec::new(),
+            implicit_workdir: false,
         }
     }
 }

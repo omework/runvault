@@ -630,7 +630,8 @@ Behavior:
 - with `to-file`, encrypted file content is stored in `env.sec` and the visible file spec is mirrored into `runvault.yaml`
 - without `to-file`, the source file content is imported as a plain env value
 - when importing as a plain env value, the source file must be valid UTF-8
-- `runvault env import` can reference this same spec file inline from a dotenv value using `@path`
+- `runvault env import` resolves dotenv `@name` values against global resources first; file resources are imported as plain env values from file content, and text resources are imported as plain env values from their text
+- when no global resource exists for a dotenv `@name` value, `runvault env import` falls back to treating it as a relative file import spec path
 - relative `src` paths are resolved relative to the YAML spec file location
 - imported file-backed keys overwrite existing values with the same key
 - `mode` and `cleanup` are only valid when `to-file` is present
