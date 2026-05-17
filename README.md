@@ -620,7 +620,7 @@ runvault resources list
 runvault resources info caddy.main_config
 ```
 
-`resources list` includes the resource name, type, and description. `resources info <id>` prints a single resource with its type, description, and path or value.
+`resources list` includes the resource name, type, description, and path. `resources info <id>` prints a single resource with its type, description, and path or value.
 
 Behavior:
 

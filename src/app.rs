@@ -81,6 +81,8 @@ pub struct ResourceListing {
     pub name: String,
     pub kind: String,
     pub description: Option<String>,
+    pub path: Option<PathBuf>,
+    pub value: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1005,13 +1007,18 @@ impl Runvault {
 
     pub fn list_resources(&self) -> Result<(), Error> {
         let resources = self.resources()?;
-        println!("{:<32} {:<6} DESCRIPTION", "NAME", "TYPE");
+        println!("{:<48} {:<6} {:<48} PATH", "NAME", "TYPE", "DESCRIPTION");
         for resource in resources {
             println!(
-                "{:<32} {:<6} {}",
+                "{:<48} {:<6} {:<48} {}",
                 resource.name,
                 resource.kind,
-                resource.description.unwrap_or_default()
+                resource.description.unwrap_or_default(),
+                resource
+                    .path
+                    .as_deref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default()
             );
         }
         Ok(())
@@ -1024,6 +1031,8 @@ impl Runvault {
                 name: name.clone(),
                 kind: entry.kind().to_string(),
                 description: entry.description().map(ToString::to_string),
+                path: resource_path(entry),
+                value: resource_value(entry),
             })
             .collect())
     }
@@ -1647,6 +1656,20 @@ fn resource_info_from_entry(name: &str, entry: &ResourceRegistryEntry) -> Resour
     }
 }
 
+fn resource_path(entry: &ResourceRegistryEntry) -> Option<PathBuf> {
+    match entry {
+        ResourceRegistryEntry::File { path, .. } => Some(path.clone()),
+        ResourceRegistryEntry::Text { .. } => None,
+    }
+}
+
+fn resource_value(entry: &ResourceRegistryEntry) -> Option<String> {
+    match entry {
+        ResourceRegistryEntry::File { .. } => None,
+        ResourceRegistryEntry::Text { value, .. } => Some(value.clone()),
+    }
+}
+
 fn file_import_spec_from_resource_entry(
     entry: &ResourceRegistryEntry,
     base_dir: &Path,
@@ -2238,6 +2261,8 @@ assets:
             resources[0].description.as_deref(),
             Some("Shared app namespace")
         );
+        assert_eq!(resources[0].path, None);
+        assert_eq!(resources[0].value.as_deref(), Some("glt-market"));
 
         unsafe {
             match previous_home {
