@@ -1,13 +1,16 @@
-use std::{
-    env,
-    path::{Component, Path, PathBuf},
-    process::Command,
-};
+use std::path::Path;
+#[cfg(any(test, target_os = "macos"))]
+use std::path::{Component, PathBuf};
+#[cfg(target_os = "macos")]
+use std::{env, process::Command};
 
-use age::secrecy::{ExposeSecret, SecretString};
+#[cfg(target_os = "macos")]
+use age::secrecy::ExposeSecret;
+use age::secrecy::SecretString;
 
 use crate::error::Error;
 
+#[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "runvault";
 
 pub fn load_password(profile_path: &Path) -> Result<Option<SecretString>, Error> {
@@ -134,6 +137,7 @@ pub fn clear_all_passwords() -> Result<(), Error> {
     }
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn store_key(profile_path: &Path) -> Result<String, Error> {
     let absolute = if profile_path.exists() {
         profile_path.canonicalize().map_err(Error::PasswordPrompt)?
@@ -149,10 +153,12 @@ fn store_key(profile_path: &Path) -> Result<String, Error> {
     Ok(format!("profile:{}", normalize_path(&absolute)))
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn normalize_path(path: &PathBuf) -> String {
     path.to_string_lossy().to_string()
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn normalize_pathbuf(path: PathBuf) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
