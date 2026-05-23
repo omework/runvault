@@ -82,6 +82,8 @@ runvault rollback --name ovh-services
 runvault bundles list
 runvault bundles versions --name ovh-services
 runvault jwt generate --issuer runvault --audience tempo --subject worker --ttl 15m
+runvault secret generate > secret.txt
+runvault secret generate --output secret.txt --force
 runvault env set DATABASE_URL --value postgres://...
 runvault env set deployments/ovh/services DATABASE_URL --value postgres://...
 runvault --profile deployments/ovh/services env set DATABASE_URL --value postgres://...
@@ -457,6 +459,26 @@ Behavior:
   - `aud`
   - `sub`
 
+## Generating a secret
+
+You can generate a random base64url secret and print it to stdout:
+
+```bash
+runvault secret generate > secret.txt
+```
+
+You can also write it directly:
+
+```bash
+runvault secret generate --output secret.txt
+```
+
+Behavior:
+
+- generated secrets use the same 32 random bytes and base64url-no-padding encoding used for JWT signing secrets
+- stdout output does not append a trailing newline
+- `--output` writes the secret without a trailing newline and refuses to overwrite existing files unless `--force` is present
+
 ## Importing an existing env file
 
 You can bulk-load an existing dotenv-style file into the encrypted vault:
@@ -617,10 +639,11 @@ List registered resources:
 
 ```bash
 runvault resources list
+runvault resources list ovh
 runvault resources info caddy.main_config
 ```
 
-`resources list` includes the resource name, type, description, and path. `resources info <id>` prints a single resource with its type, description, and path or value.
+`resources list [prefix]` includes the resource name, type, description, and path, optionally filtered to resource names starting with `prefix`. `resources info <id>` prints a single resource with its type, description, and path or value.
 
 Behavior:
 

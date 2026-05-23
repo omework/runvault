@@ -28,6 +28,7 @@ pub enum Command {
     Env(EnvCommand),
     Assets(AssetsCommand),
     Pki(PkiCommand),
+    Secret(SecretCommand),
     #[command(hide = true)]
     Import(ImportCommand),
     Resources(ResourcesCommand),
@@ -197,6 +198,25 @@ pub enum JwtSubcommand {
 }
 
 #[derive(Debug, Args)]
+pub struct SecretCommand {
+    #[command(subcommand)]
+    pub command: SecretSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SecretSubcommand {
+    Generate(SecretGenerateArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SecretGenerateArgs {
+    #[arg(long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct AssetsCommand {
     #[command(subcommand)]
     pub command: AssetsSubcommand,
@@ -313,7 +333,10 @@ pub enum ResourcesSubcommand {
 }
 
 #[derive(Debug, Args)]
-pub struct ResourcesListArgs {}
+pub struct ResourcesListArgs {
+    #[arg(value_name = "PREFIX")]
+    pub prefix: Option<String>,
+}
 
 #[derive(Debug, Args)]
 pub struct ResourcesInfoArgs {
@@ -716,7 +739,7 @@ mod tests {
     use super::{
         AssetsSubcommand, BundlesSubcommand, Cli, CmdSubcommand, Command, DEFAULT_PROFILE_DIR,
         EnvSubcommand, JwtSubcommand, PingSubcommand, PkiSubcommand, ProfileSubcommand,
-        ResourcesAddSubcommand, ResourcesSubcommand,
+        ResourcesAddSubcommand, ResourcesSubcommand, SecretSubcommand,
     };
     use clap::Parser;
     use std::{
@@ -934,6 +957,40 @@ mod tests {
             panic!("expected pki init subcommand");
         };
         assert_eq!(args.days, 3650);
+        assert!(args.force);
+    }
+
+    #[test]
+    fn secret_generate_parses_stdout_default() {
+        let cli = Cli::try_parse_from(["runvault", "secret", "generate"]).unwrap();
+
+        let Command::Secret(args) = cli.command else {
+            panic!("expected secret command");
+        };
+        let SecretSubcommand::Generate(args) = args.command;
+
+        assert_eq!(args.output, None);
+        assert!(!args.force);
+    }
+
+    #[test]
+    fn secret_generate_parses_output_file() {
+        let cli = Cli::try_parse_from([
+            "runvault",
+            "secret",
+            "generate",
+            "--output",
+            "secret.txt",
+            "--force",
+        ])
+        .unwrap();
+
+        let Command::Secret(args) = cli.command else {
+            panic!("expected secret command");
+        };
+        let SecretSubcommand::Generate(args) = args.command;
+
+        assert_eq!(args.output, Some(PathBuf::from("secret.txt")));
         assert!(args.force);
     }
 
@@ -1397,9 +1454,25 @@ mod tests {
         let Command::Resources(args) = cli.command else {
             panic!("expected resources command");
         };
-        let ResourcesSubcommand::List(_args) = args.command else {
+        let ResourcesSubcommand::List(args) = args.command else {
             panic!("expected resources list subcommand");
         };
+
+        assert_eq!(args.prefix, None);
+    }
+
+    #[test]
+    fn resources_list_parses_prefix_filter() {
+        let cli = Cli::try_parse_from(["runvault", "resources", "list", "ovh"]).unwrap();
+
+        let Command::Resources(args) = cli.command else {
+            panic!("expected resources command");
+        };
+        let ResourcesSubcommand::List(args) = args.command else {
+            panic!("expected resources list subcommand");
+        };
+
+        assert_eq!(args.prefix.as_deref(), Some("ovh"));
     }
 
     #[test]

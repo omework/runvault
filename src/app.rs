@@ -13,7 +13,7 @@ use crate::{
         AssetsSubcommand, BundleVersionsArgs, BundlesSubcommand, Cli, CmdSubcommand, Command,
         EnvSubcommand, ImportAssetsArgs, ImportEnvArgs, ImportSubcommand, JwtSubcommand,
         PingSubcommand, PkiSubcommand, ProfileArgs, ProfileSubcommand, ResourcesAddSubcommand,
-        ResourcesSubcommand, RollbackArgs,
+        ResourcesSubcommand, RollbackArgs, SecretGenerateArgs, SecretSubcommand,
     },
     crypto::{encrypt_file_payload, maybe_decrypt_file_payload},
     envfile::{apply_prefix, parse_env_bytes, parse_reference_value},
@@ -247,6 +247,9 @@ impl Runvault {
                     self.run_jwt_generate_command(profile.as_ref(), args)
                 }
             },
+            Command::Secret(args) => match args.command {
+                SecretSubcommand::Generate(args) => self.run_secret_generate_command(args),
+            },
             Command::Set(args) => self.run_env_set_command(profile.as_ref(), args),
             Command::Pki(args) => match args.command {
                 PkiSubcommand::Init(args) => {
@@ -305,7 +308,7 @@ impl Runvault {
             },
             Command::Resources(args) => match args.command {
                 ResourcesSubcommand::Import(args) => self.import_resources(&args.inputs),
-                ResourcesSubcommand::List(_) => self.list_resources(),
+                ResourcesSubcommand::List(args) => self.list_resources(args.prefix.as_deref()),
                 ResourcesSubcommand::Info(args) => self.print_resource_info(&args.id),
                 ResourcesSubcommand::Add(args) => match args.command {
                     ResourcesAddSubcommand::File(args) => {
@@ -401,6 +404,20 @@ impl Runvault {
         )?;
         println!("{}", token);
         Ok(())
+    }
+
+    fn run_secret_generate_command(&self, args: SecretGenerateArgs) -> Result<(), Error> {
+        let secret = self.generate_secret()?;
+        if let Some(output) = args.output {
+            self.write_generated_secret(&output, &secret, args.force)
+        } else {
+            std::io::stdout()
+                .write_all(secret.as_bytes())
+                .map_err(|source| Error::WriteFile {
+                    path: PathBuf::from("<stdout>"),
+                    source,
+                })
+        }
     }
 
     fn run_env_set_command(
@@ -644,6 +661,33 @@ impl Runvault {
             generate_signing_secret()?
         };
         generate_hs256(&signing_secret, options)
+    }
+
+    pub fn generate_secret(&self) -> Result<String, Error> {
+        generate_signing_secret()
+    }
+
+    pub fn write_generated_secret(
+        &self,
+        output_path: &Path,
+        secret: &str,
+        force: bool,
+    ) -> Result<(), Error> {
+        if output_path.exists() && !force {
+            return Err(Error::AlreadyExists(output_path.to_path_buf()));
+        }
+        if let Some(parent) = output_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|source| Error::WriteFile {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+            }
+        }
+        std::fs::write(output_path, secret.as_bytes()).map_err(|source| Error::WriteFile {
+            path: output_path.to_path_buf(),
+            source,
+        })
     }
 
     pub fn set_secret(
@@ -1005,8 +1049,8 @@ impl Runvault {
         vault::save_vault_with_password(&loaded, &profile_path, &vault, password)
     }
 
-    pub fn list_resources(&self) -> Result<(), Error> {
-        let resources = self.resources()?;
+    pub fn list_resources(&self, prefix: Option<&str>) -> Result<(), Error> {
+        let resources = self.resources_with_prefix(prefix)?;
         println!("{:<48} {:<6} {:<48} PATH", "NAME", "TYPE", "DESCRIPTION");
         for resource in resources {
             println!(
@@ -1025,8 +1069,16 @@ impl Runvault {
     }
 
     pub fn resources(&self) -> Result<Vec<ResourceListing>, Error> {
+        self.resources_with_prefix(None)
+    }
+
+    pub fn resources_with_prefix(
+        &self,
+        prefix: Option<&str>,
+    ) -> Result<Vec<ResourceListing>, Error> {
         Ok(load_global_resources()?
             .iter()
+            .filter(|(name, _)| prefix.map_or(true, |prefix| name.starts_with(prefix)))
             .map(|(name, entry)| ResourceListing {
                 name: name.clone(),
                 kind: entry.kind().to_string(),
@@ -1999,6 +2051,18 @@ mod tests {
     }
 
     #[test]
+    fn write_generated_secret_writes_without_trailing_newline() {
+        let dir = tempdir().unwrap();
+        let output = dir.path().join("secret.txt");
+
+        Runvault::default()
+            .write_generated_secret(&output, "secret-value", false)
+            .unwrap();
+
+        assert_eq!(std::fs::read(&output).unwrap(), b"secret-value");
+    }
+
+    #[test]
     fn bundle_listing_returns_registered_names_and_versions() {
         let _guard = ENV_LOCK.lock().unwrap();
         let dir = tempdir().unwrap();
@@ -2263,6 +2327,36 @@ assets:
         );
         assert_eq!(resources[0].path, None);
         assert_eq!(resources[0].value.as_deref(), Some("glt-market"));
+
+        unsafe {
+            match previous_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn resources_with_prefix_filters_by_resource_name() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let previous_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", dir.path());
+        }
+
+        let runvault = Runvault::default();
+        runvault
+            .add_text_resource("ovh.secret", "a".to_string(), None)
+            .unwrap();
+        runvault
+            .add_text_resource("home.secret", "b".to_string(), None)
+            .unwrap();
+
+        let resources = runvault.resources_with_prefix(Some("ovh")).unwrap();
+
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].name, "ovh.secret");
 
         unsafe {
             match previous_home {
